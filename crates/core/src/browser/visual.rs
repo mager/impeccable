@@ -10,7 +10,7 @@ use super::dom::{
     closest_or_none, direct_text, pf0, safe_id, style_px, tag_lower, Dom, ElId, Rect,
 };
 use super::element_checks::parse_rgb_or_any;
-use crate::color::{contrast_ratio, parse_gradient_colors, parse_rgb, Rgba};
+use crate::color::{composite_color_over, contrast_ratio, parse_gradient_colors, parse_rgb, split_top_level_commas, Rgba};
 use crate::constants::{SAFE_TAGS, WCAG_LARGE_BOLD_TEXT_PX, WCAG_LARGE_TEXT_PX};
 use crate::js::{self, math_max, math_min, math_round, number_to_string, parse_float, parse_int, to_fixed, WS};
 use crate::js_ext_a::{num_truthy, split_ws};
@@ -765,6 +765,40 @@ fn with_method(sample: Value, method: &str) -> Value {
     }
 }
 
+/// Resolve gradient-only image layers over an opaque same-element color.
+/// Keep the existing image/underlay path when that ground is not known.
+fn opaque_gradient_colors(dom: &dyn Dom, node: ElId, image: &str) -> Option<Vec<Rgba>> {
+    let base = parse_rgb_or_any(&dom.style(node, "backgroundColor"))?;
+    if base.alpha_or_one() < 1.0 {
+        return None;
+    }
+    let mut colors = vec![base];
+    // CSS lists the uppermost background first; paint from the bottom up.
+    for layer in split_top_level_commas(image).iter().rev() {
+        if layer.trim() == "none" {
+            continue;
+        }
+        if URL_RE.is_match(layer) || !GRADIENT_RE.is_match(layer) {
+            return None;
+        }
+        let stops = parse_gradient_colors(Some(layer));
+        if stops.is_empty() || colors.len().saturating_mul(stops.len()) > 256 {
+            return None;
+        }
+        let mut painted = Vec::new();
+        for stop in &stops {
+            for ground in &colors {
+                let color = composite_color_over(stop, ground);
+                if !painted.contains(&color) {
+                    painted.push(color);
+                }
+            }
+        }
+        colors = painted;
+    }
+    Some(colors)
+}
+
 /// JS: index.mjs#sampleCssBackground — every decision except the image
 /// load and the canvas sample.
 pub fn css_plan(dom: &dyn Dom, node: ElId, text_color: Option<&Rgba>) -> CssPlan {
@@ -772,7 +806,11 @@ pub fn css_plan(dom: &dyn Dom, node: ElId, text_color: Option<&Rgba>) -> CssPlan
     if !bg_image.is_empty() && bg_image != "none" {
         if GRADIENT_RE.is_match(&bg_image) {
             if let Some(tc) = text_color {
-                let colors = parse_gradient_colors(Some(&bg_image));
+                // A CSS background color paints beneath every image layer on
+                // this same element. Compose first, then choose the worst
+                // contrast; transparent black is not a painted black stop.
+                let colors = opaque_gradient_colors(dom, node, &bg_image)
+                    .unwrap_or_else(|| parse_gradient_colors(Some(&bg_image)));
                 if let Some(color) = pick_worst_contrast_color(tc, &colors) {
                     return CssPlan::Sample {
                         sample: json!({ "status": "sampled", "color": color, "method": "analytic-gradient" }),
@@ -1072,6 +1110,53 @@ mod tests {
         let worst = pick_worst_contrast_color(&rgba(0.0, 0.0, 0.0, 1.0), &[bg, rgba(20.0, 20.0, 20.0, 1.0)]).unwrap();
         assert_eq!(worst.r, 20.0);
         assert!(pick_worst_contrast_color(&bg, &[]).is_none());
+    }
+
+    #[test]
+    fn translucent_gradients_use_painted_background_before_contrast() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let section = d.add(Some(body), "section");
+        d.set_styles(body, &[("backgroundColor", "rgb(0, 0, 0)")]);
+        d.set_styles(section, &[
+            ("backgroundColor", "rgb(255, 255, 255)"),
+            ("backgroundImage", "radial-gradient(rgba(233, 231, 249, 0.72), rgba(0, 0, 0, 0)), linear-gradient(rgb(242, 240, 250), rgba(0, 0, 0, 0))"),
+        ]);
+        for (text, should_fail) in [
+            (rgba(24.0, 25.0, 28.0, 1.0), false),
+            (rgba(103.0, 105.0, 111.0, 1.0), false),
+            (rgba(255.0, 255.0, 255.0, 1.0), true),
+        ] {
+            let CssPlan::Sample { sample } = css_plan(&d, section, Some(&text)) else { panic!("expected gradient sample") };
+            assert!(sample_is_opaque(&sample), "gradient must include its own white ground: {sample}");
+            let out = finish_analysis(&json!({ "threshold": 4.5 }), &text, &vec![sample; 3], 3);
+            assert_eq!(out["status"] == "fail", should_fail, "{out}");
+        }
+    }
+
+    #[test]
+    fn gradient_layers_paint_in_css_order() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        d.set_styles(body, &[("backgroundColor", "rgb(0, 0, 0)")]);
+        let colors = opaque_gradient_colors(&d, body,
+            "linear-gradient(rgb(255, 255, 255), rgb(255, 255, 255)), linear-gradient(rgb(0, 0, 0), rgb(0, 0, 0))").unwrap();
+        assert_eq!(colors, vec![rgba(255.0, 255.0, 255.0, 1.0)]);
+        let colors = opaque_gradient_colors(&d, body,
+            "linear-gradient(rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.5)), linear-gradient(rgba(255, 255, 255, 0.5), rgba(255, 255, 255, 0.5))").unwrap();
+        assert_eq!(colors, vec![rgba(192.0, 192.0, 192.0, 1.0)]);
+    }
+
+    #[test]
+    fn gradient_fast_path_requires_known_opaque_ground() {
+        let mut d = FakeDom::new();
+        let (_html, body) = d.with_page();
+        let gradient = "linear-gradient(rgb(255, 255, 255), rgba(0, 0, 0, 0))";
+        d.set_styles(body, &[("backgroundColor", "rgba(255, 255, 255, 0.5)")]);
+        assert!(opaque_gradient_colors(&d, body, gradient).is_none());
+        d.set_styles(body, &[("backgroundColor", "rgb(255, 255, 255)")]);
+        assert!(opaque_gradient_colors(&d, body, &format!("{gradient}, url(photo.png)")).is_none());
+        assert!(opaque_gradient_colors(&d, body, "linear-gradient(unreadable, unreadable)").is_none());
     }
 
     #[test]

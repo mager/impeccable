@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gradient alpha contrast regression</title>
+  <!-- Browser/URL visual-pass cases. Static HTML contrast is a separate adapter. -->
+  <style>
+    body { margin: 0; padding: 24px; background: #181818; color: #fff; font: 18px Arial, sans-serif; }
+    main { display: grid; grid-template-columns: 440px 440px; gap: 24px; }
+    article { box-sizing: border-box; width: 440px; height: 140px; padding: 20px; margin-bottom: 16px; }
+    h2 { font-size: 24px; }
+    h3 { font-size: 18px; font-weight: 400; }
+    .pale { background: radial-gradient(ellipse at 75% 42%, rgba(233, 231, 249, .72), transparent 58%), linear-gradient(to bottom, #f2f0fa, transparent 75%), #fff; }
+    .dark { background: linear-gradient(rgba(20, 20, 20, .5), transparent), #181818; }
+    .covered { background: linear-gradient(#fff, #fff), linear-gradient(#000, #000), #fff; }
+    .tinted { background: linear-gradient(rgba(0, 0, 0, .1), rgba(0, 0, 0, .1)), #fff; }
+  </style>
+</head>
+<body>
+  <h1>Transparent gradient contrast</h1>
+  <main>
+    <section data-col="flag">
+      <h2>Should flag</h2>
+      <article class="pale"><h3 style="color: #fff">White text on pale layers</h3></article>
+      <article class="pale"><h3 style="color: #a3a3a3">Gray text on pale layers</h3></article>
+      <article class="dark"><h3 style="color: #222">Dark text on dark layers</h3></article>
+      <article class="covered"><h3 style="color: #ddd">Pale text on an opaque white top layer</h3></article>
+    </section>
+    <section data-col="pass">
+      <h2>Should pass</h2>
+      <article class="pale"><h3 style="color: #18191c">Near-black heading on pale layers</h3></article>
+      <article class="pale"><h3 style="color: #67696f">Readable gray on pale layers</h3></article>
+      <article class="dark"><h3 style="color: #fff">White text on dark layers</h3></article>
+      <article class="covered"><h3 style="color: #111">Opaque upper gradient covers a dark lower layer</h3></article>
+      <article class="tinted"><h3 style="color: #222">Dark text on a translucent gray tint</h3></article>
+    </section>
+  </main>
+</body>
+</html>

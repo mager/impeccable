@@ -46,6 +46,7 @@
     "rebuild": "bun run clean && bun run build",
     "rebuild:release": "bun run clean && bun run build:release",
     "test": "node scripts/run-tests.mjs default",
+    "test:browser-contrast-e2e": "node scripts/run-tests.mjs browser-contrast-e2e",
     "test:core": "node scripts/run-tests.mjs core",
     "test:oracle": "node scripts/run-tests.mjs oracle",
     "test:detector": "node scripts/run-tests.mjs detector",

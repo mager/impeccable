@@ -3,6 +3,7 @@ import path from 'node:path';
 
 export const DEFAULT_SUITES = ['core', 'oracle', 'detector', 'live', 'framework', 'plugin-e2e'];
 export const OPT_IN_SUITES = [
+  'browser-contrast-e2e',
   'cli-remote-e2e',
   'live-e2e',
   'live-e2e-accept-cleanup',
@@ -26,6 +27,20 @@ const COMMON_INFRA_PATTERNS = [
 ];
 
 export const SUITES = {
+  'browser-contrast-e2e': {
+    description: 'Native URL and WASM gradient contrast regression in a real browser.',
+    optIn: true,
+    needsPlaywright: true,
+    triggers: [
+      /^crates\/core\/src\/browser\/visual\.rs$/,
+      /^tests\/fixtures\/antipatterns\/gradient-alpha-contrast\.html$/,
+    ],
+    commands: [{
+      runner: 'node',
+      timeoutMs: 90000,
+      files: ['tests/gradient-alpha-contrast.test.mjs'],
+    }],
+  },
   core: {
     description: 'Build, provider transforms, hook manifests, plugin validators, and prose gates.',
     triggers: [

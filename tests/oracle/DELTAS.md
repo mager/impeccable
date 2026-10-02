@@ -306,3 +306,19 @@ Seed cases now set `IMPECCABLE_SKILL_DIR` to `tests/fixtures/mode-rules-skill` (
 - `question-update-comps-next`, `question-wait-flip`: the NEXT line reads `it and the MODE RULES block concept-seed printed for this surface govern every card's image` where it read `its comp rules govern every card's image`.
 
 Exit status, stderr and files are unchanged everywhere. New cases: `seed-mode-rules-persuade`, `-experience` (reads `mode-persuade.md`), `-operate`, `-read` (one per mode file, `oracle-key-5`), and `seed-mode-rules-missing-file`, `-missing-section` against `tests/fixtures/mode-rules-skill-partial` (no `mode-read.md`; a `mode-operate.md` without `## Comps`), which print the unavailable line.
+
+## Recorded 2026-10-01: gradient alpha browser regression (#881)
+
+Added `detect-fixture-{json,text}-gradient-alpha-contrast-html` and reviewed
+fixture-directory text/quiet, type/both scope, and no-advisory snapshots.
+Existing findings are unchanged; only the new fixture's static-adapter findings
+and aggregate counts were added. The all-fixtures JSON snapshot received the
+same additive fixture rows, preserving its pre-existing accepted delta.
+
+This fixture's should-pass/should-flag columns target the browser visual pass.
+The static adapter remains unchanged and still mis-composites some of these
+layers; its output is recorded, not asserted as a clean browser verdict.
+The behavioral regression is checked by Rust visual-sampler tests and
+`node --test tests/gradient-alpha-contrast.test.mjs`, which exercises the native
+URL scanner and the rebuilt WASM bundle against the same nine browser cases.
+Frozen function vectors are unchanged.
