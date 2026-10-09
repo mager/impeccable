@@ -7036,6 +7036,7 @@ Added four reviewed goldens: the new fixture in JSON/text modes, plus an isolate
 advisory-only target with and without `--no-advisory`. The fixture has exactly
 four `hard-offset-shadow` advisory findings and exits 0. The isolated case also
 exits 0, and its `--no-advisory` control returns `[]`. None of the existing
-individual fixture goldens changed. Existing accepted directory/scope deltas
-remain; the new fixture adds four advisories to the applicable directory scans.
+individual fixture goldens changed. Three directory goldens were refreshed after
+confirming the only finding-array additions were the four new advisories, with
+no removals. The primary count remains 945; the advisory count is 164 → 168.
 Frozen function-level vectors were not regenerated.
