@@ -27,8 +27,10 @@ In each browser:
 3. Follow the link to `clean.html` and explicitly scan. Expect zero findings
    and no error (zero before a scan is not proof of successful scanning).
 4. Navigate back to `flagged.html` and scan. Expect one finding again.
-5. Close and reopen the browser with the temporary extension loaded, then
-   repeat the first scan to exercise a cold core startup.
+5. In Chrome, close and reopen the browser, then repeat the first scan.
+   Firefox removes temporary extensions when it closes: reopen Firefox and load
+   the extension again through `about:debugging`, or rerun `web-ext run`, then
+   repeat the first scan. This exercises a cold core startup in each browser.
 
 The released Firefox 1.4.0 artifact fails at step 1 with the
 `OFFSCREEN_DOCUMENT` error from issue #847. Test desktop Firefox and Chrome

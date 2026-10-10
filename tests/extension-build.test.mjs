@@ -23,7 +23,7 @@ function scannerHarness({ firefox = false, existingHost = false, failFirstCreate
       async getContexts(filter) {
         if (firefox) throw new Error('Invalid enumeration value "OFFSCREEN_DOCUMENT"');
         assert.deepEqual(Array.from(filter.contextTypes), ['OFFSCREEN_DOCUMENT']);
-        return existingHost ? [{}] : [];
+        return ready ? [{}] : [];
       },
       async sendMessage(message) {
         runtimeMessages.push(message);
@@ -100,6 +100,45 @@ describe('extension rule core startup', () => {
       await vm.runInContext('sendScanToTab(7)', h.context);
       assert.equal(h.tabMessages.length, 0);
       assert.match(h.runtimeMessages.find(m => m.action === 'scan-failed')?.message || '', /WASM failed to load/);
+    });
+
+    it(`retries while the ${browser} core message listener is not registered`, async () => {
+      let pings = 0;
+      const h = scannerHarness({ firefox, ping: () => {
+        assert.equal(h.tabMessages.length, 0, 'scan must wait for a successful ping');
+        if (++pings <= 2) throw new Error('Could not establish connection. Receiving end does not exist.');
+        return { ok: true };
+      } });
+      await vm.runInContext('sendScanToTab(7)', h.context);
+      assert.equal(pings, 3);
+      assert.equal(h.creates(), 1);
+      assert.deepEqual(h.tabMessages.map(m => [m.tabId, m.action]), [[7, 'scan']]);
+      assert.equal(h.runtimeMessages.filter(m => m.action === 'scan-failed').length, 0);
+    });
+
+    it(`reports exhausted ${browser} startup retries and recovers on the next scan`, async () => {
+      let listenerReady = false;
+      let pings = 0;
+      const h = scannerHarness({ firefox, ping: () => {
+        pings++;
+        if (!listenerReady) throw new Error('Could not establish connection. Receiving end does not exist.');
+        return { ok: true };
+      } });
+      await vm.runInContext('sendScanToTab(7)', h.context);
+      assert.equal(pings, 50);
+      assert.equal(h.tabMessages.length, 0);
+      const failures = h.runtimeMessages.filter(m => m.action === 'scan-failed');
+      assert.equal(failures.length, 1);
+      assert.equal(failures[0].tabId, 7);
+      assert.match(failures[0].message, /rule core did not answer/);
+
+      listenerReady = true;
+      await vm.runInContext('sendScanToTab(7)', h.context);
+      assert.equal(pings, 51, 'a failed startup must not leave a cached rejected promise');
+      assert.equal(h.creates(), 1, 'reuse the existing core host');
+      assert.deepEqual(h.tabMessages.map(m => [m.tabId, m.action]), [[7, 'scan']]);
+      assert.equal(h.runtimeMessages.filter(m => m.action === 'scan-failed').length, 1);
+      if (firefox) assert.equal(h.frames.length, 1, 'reuse the existing background iframe');
     });
   }
 
