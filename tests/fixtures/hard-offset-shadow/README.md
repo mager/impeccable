@@ -25,7 +25,13 @@ panels and eight should-pass panels, with explicit sizes and distinct headings.
 bundle in Puppeteer Chrome and installed Firefox (set `FIREFOX_PATH` outside the
 macOS default). It asserts advisory metadata, repeated scans, and rule disabling
 and re-enabling. JSON evidence and fixture screenshots land in `build/929/`.
-This checks the real WASM consumer, not the extension popup/DevTools wiring.
+It also renders the shipped DevTools panel in both browsers, feeds it those real
+WASM findings through a stubbed extension port, and checks the **Advisories**
+heading, four findings, rule settings, and the actual single/copy-all buttons.
+Copied shadow reports must not claim AI authorship or suggest `/polish`.
+Extension APIs are stubbed in this harness; packaged extension wiring was checked
+separately below. Run `node --test tests/extension-devtools.test.mjs` for the
+fast report regressions, including mixed categories and other rules' suggestions.
 
 
 Serve `tests/fixtures/antipatterns` locally and open `hard-offset-shadow.html`.
@@ -63,11 +69,16 @@ four overlays. The pass column remains clear. The Firefox test combines the
 current detector with #996's background host and manifest compatibility changes;
 it does not establish that this branch alone fixes Firefox scanning.
 
-Presentation caveat: DevTools puts this rule in its existing **AI TELLS** group
-because the registry category is `slop`. The individual finding is advisory and
-asks about intended direction, but the group heading can still imply authorship.
-Review that presentation before marking the PR ready; these tests do not certify
-that every consumer presents the advisory without an AI label.
+### Advisory presentation regression
+
+DevTools now puts this rule in **Advisories**, including settings and copy-all,
+and omits automatic fix-skill suggestions for it. The engine's `slop` category
+remains unchanged for compatibility; this presentation override is limited to
+`hard-offset-shadow`. Existing rules keep their grouping and suggestions.
+
+Report regressions were run before the fix (three failures) and after it (four
+passing tests). The browser harness exercises the rendered panel and clipboard
+buttons, rather than only checking source strings.
 
 ### Real-site intentional controls (2026-10-10)
 
@@ -83,7 +94,87 @@ are expected geometric matches, not evidence of unwanted design or AI authorship
 The controls demonstrate that this check cannot infer intent. Other rules also
 reported findings, so their overall CLI exit codes are not an advisory-only test.
 Counts are observations of live sites, not stable regression assertions.
-Real unwanted-design examples with an accompanying design brief remain pending.
+These are intentional controls, not confirmed unwanted-design examples.
+
+### Real-project hover-state review (2026-10-10)
+
+Tested the running prxps `/bracket-2026` page in Chrome 154 using this branch's
+WASM bundle. The route and brief are unchanged from
+[prxps `281f09669`](https://github.com/mager/prxps/tree/281f09669fc227df94c1b4d5c282539500152431).
+The local project has unrelated work in progress; it was not modified for this test.
+
+| State | Resolved box shadow | Hard-offset advisories |
+| --- | --- | --- |
+| Rest / pointer away | None on tested cards | 0 |
+| Hover `#card-e-1-16` | `rgb(17, 17, 17) 4px 4px 0px 0px` | 1 |
+| Hover `#card-e-8-9` (upset card) | `rgb(229, 62, 62) 4px 4px 0px 0px` | 1 |
+| Pointer moved away again | None on tested cards | 0 |
+
+Reproduce with the local prxps dev server and the in-page bundle, move the pointer
+to each card, wait for its 150ms transition to settle, then invoke
+`window.impeccableDetect()`. Filter by `type === "hard-offset-shadow"`.
+The route declares these shadows in
+[`+page.svelte`](https://github.com/mager/prxps/blob/281f09669fc227df94c1b4d5c282539500152431/frontend/src/routes/bracket-2026/+page.svelte#L545).
+Its [design brief](https://github.com/mager/prxps/blob/281f09669fc227df94c1b4d5c282539500152431/DESIGN.md#L137)
+calls for soft card shadows and physical hover interactions. That makes these
+useful candidates for human review, but does not prove they are unwanted or
+AI-authored. Owner confirmation remains pending. The separate `.input:focus`
+hard shadow is not counted as unwanted evidence: it has a focus-indication role
+and a dark-scheme override.
+
+This also establishes a limit: a scan at rest does not discover a hover-only
+shadow. Exercise the relevant interaction before scanning; the detector does not
+automatically walk interaction states.
+
+## Latest validation and baseline disposition (2026-10-10)
+
+Built this branch from scratch with a dedicated `CARGO_TARGET_DIR`, then set
+`IMPECCABLE_BIN` to that directory's release binary for the JS tests. This rules
+out stale shared build artifacts as the explanation for the failures below.
+
+- Focused Rust: core rule, both static HTML tests, and native Chromium test pass.
+- Full oracle corpus replay passes with zero unreviewed differences.
+- Extension packaging/report tests: 7 pass. Suite-selection tests also pass.
+- Chrome 154 and isolated Firefox 157.0.1: WASM scan/repeat `4 / 4`, disable/restore
+  `0 / 4`; rendered panel, settings, copy-all and single-copy assertions pass.
+  The system Firefox updater prevented launch, so the current UI check used a
+  separate Puppeteer test installation. Extension APIs in this panel harness are
+  stubbed; see the separate packaged-extension observations above.
+- Framework: 191 pass. Plugin loader: 4 pass.
+- Source build and Chrome/Firefox packaging pass; bundling leaves the tracked
+  engine assets unchanged. The Firefox package still needs the separate #996 fix.
+- `cargo test --workspace` is **not green**: it stops at
+  `build_phase::integrity_tests::artifact_cleanup_failure_blocks_the_gate`, with
+  `stale evidence: regions/retired.png`.
+- `bun run test` is **not green**: core, oracle and detector stages pass; the live
+  stage reports 221 pass, 6 fail, 2 skip. Framework/plugin stages were run
+  separately after the stop.
+
+For comparison, exported the clean PR base `d631a8827f99414d2b6daba4ef08b7f8701751d7`
+with `git archive`, built it in another dedicated target directory, and ran:
+
+```sh
+cargo test --release -p impeccable-comp-verbs artifact_cleanup_failure_blocks_the_gate
+IMPECCABLE_BIN=/absolute/path/to/base/target/release/impeccable \
+  node --test tests/live-agent-target.test.mjs
+```
+
+The base has the **same cleanup assertion failure**. Its live-target run reports
+33 pass / 7 fail, including **all six** failures from this branch:
+
+- holder turns busy;
+- denied claimant pending status;
+- disconnected holder releases its lease;
+- all idle pages decline resolution;
+- a previously unresolvable element mounts during the grace period;
+- last silent overlay disconnects.
+
+The base additionally fails the already-answered-target/session case. The denied
+claimant and late-mounted-element cases pass when run alone on this branch.
+These results establish baseline/timing problems, not a green broad suite.
+The affected live-server sources, cleanup sources, and live-target tests have
+no diff from the base; this PR does not change their behavior or relax assertions.
+Do not run two copies of the live-target suite concurrently: it binds port 8497.
 
 ## Limits and calibration before ready
 
