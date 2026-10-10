@@ -48,6 +48,43 @@ Firefox's offscreen-host compatibility fix is tracked separately in #847. Test
 with that patch when exercising the extension rather than just the in-page WASM
 bundle. Keep the two PRs independent.
 
+### Packaged extension verification (2026-10-10)
+
+Tested the current detector after the DOM-helper refactor in the actual extension
+popup and DevTools panel, separately from the automated in-page WASM harness:
+
+| Browser | Package | Scan / repeat | Disable / re-enable |
+| --- | --- | --- | --- |
+| Chrome for Testing 154 | Current unpacked Chrome bundle | 4 / 4 | 0 / 4 |
+| Firefox 157 | Current Firefox bundle plus #996 at `50368e772` | 4 / 4 | 0 / 4 |
+
+Both panels identify `#flag-0` through `#flag-3`, and repeated scans leave exactly
+four overlays. The pass column remains clear. The Firefox test combines the
+current detector with #996's background host and manifest compatibility changes;
+it does not establish that this branch alone fixes Firefox scanning.
+
+Presentation caveat: DevTools puts this rule in its existing **AI TELLS** group
+because the registry category is `slop`. The individual finding is advisory and
+asks about intended direction, but the group heading can still imply authorship.
+Review that presentation before marking the PR ready; these tests do not certify
+that every consumer presents the advisory without an AI label.
+
+### Real-site intentional controls (2026-10-10)
+
+Scanned with the rebuilt native binary using `detect --no-config --json <url>`:
+
+| Intentional control | Hard-offset advisories | Resolved shadow |
+| --- | --- | --- |
+| https://www.neobrutalism.dev/ | 4 | Black, 4px 4px, zero blur/spread |
+| https://neobrutalism.com/docs | 3 | Black, 4px 4px, zero blur/spread |
+
+These sites explicitly present a neobrutalist design direction. Their findings
+are expected geometric matches, not evidence of unwanted design or AI authorship.
+The controls demonstrate that this check cannot infer intent. Other rules also
+reported findings, so their overall CLI exit codes are not an advisory-only test.
+Counts are observations of live sites, not stable regression assertions.
+Real unwanted-design examples with an accompanying design brief remain pending.
+
 ## Limits and calibration before ready
 
 This rule measures resolved outer box shadows with zero blur, nonnegative spread,
