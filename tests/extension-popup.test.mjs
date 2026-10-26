@@ -181,7 +181,7 @@ test('partial findings stay visible but cannot be copied before the visual pass 
   await h.click('btn-scan');
   h.broadcast({ action: 'findings-updated', tabId: 7, ...state([]), scanComplete: false });
   assert.equal(h.node('btn-copy-all').disabled, true);
-  assert.equal(h.node('btn-scan').disabled, true);
+  assert.equal(h.node('btn-scan').disabled, false);
   await h.click('btn-copy-all');
   assert.equal(h.writes.length, 0);
   h.broadcast({ action: 'findings-updated', tabId: 7, ...state(), scanComplete: false });
@@ -207,8 +207,15 @@ for (const url of ['', 'https://example.test/previous']) {
 test('reopening restores scan progress and a failed scan message without old findings', async () => {
   const pending = await popup({ initial: { findings: [], url: '', scanComplete: false, scanning: true } });
   assert.equal(pending.node('count-number').textContent, '0');
-  assert.equal(pending.node('btn-scan').textContent, 'Scanning...');
-  assert.equal(pending.node('btn-scan').disabled, true);
+  assert.equal(pending.node('btn-scan').textContent, 'Restart scan');
+  assert.equal(pending.node('btn-scan').disabled, false);
+  assert.equal(pending.node('btn-copy-all').disabled, true);
+  await pending.click('btn-scan');
+  assert.equal(pending.messages.at(-1).action, 'scan');
+  assert.equal(pending.messages.at(-1).tabId, 7);
+  pending.broadcast({ action: 'scan-started', tabId: 7 });
+  assert.equal(pending.node('btn-scan').disabled, false);
+  assert.equal(pending.node('btn-copy-all').disabled, true);
   const failed = await popup({ initial: { findings: [], url: '', scanComplete: false, scanning: false, scanError: 'Snapshot failed' } });
   assert.equal(failed.node('count-number').textContent, '0');
   assert.equal(failed.node('btn-copy-all').disabled, true);

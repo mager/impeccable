@@ -51,8 +51,8 @@ function updateFromState(state) {
   btnCopyAll.disabled = !currentScan;
   showCopyStatus('');
   updateFindings(state.findings || []);
-  btnScan.textContent = state.scanning ? 'Scanning...' : 'Scan page';
-  btnScan.disabled = !!state.scanning;
+  btnScan.textContent = state.scanning ? 'Restart scan' : 'Scan page';
+  btnScan.disabled = false;
   scanError.textContent = state.scanError || '';
   scanError.hidden = !state.scanError;
   overlaysVisible = state.overlaysVisible !== false;
@@ -78,15 +78,15 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (activeTabId == null || msg.tabId !== activeTabId) return;
   if (msg.action === 'findings-updated') {
     updateFromState({ ...msg, overlaysVisible });
-    btnScan.textContent = msg.scanComplete ? 'Scan page' : 'Scanning...';
-    btnScan.disabled = !msg.scanComplete;
+    btnScan.textContent = msg.scanComplete ? 'Scan page' : 'Restart scan';
+    btnScan.disabled = false;
     scanError.hidden = true;
   }
   if (msg.action === 'scan-started' || msg.action === 'navigated') {
     clearScan();
     scanError.hidden = true;
-    btnScan.textContent = msg.action === 'scan-started' ? 'Scanning...' : 'Scan page';
-    btnScan.disabled = msg.action === 'scan-started';
+    btnScan.textContent = msg.action === 'scan-started' ? 'Restart scan' : 'Scan page';
+    btnScan.disabled = false;
   }
   if (msg.action === 'scan-failed') {
     clearScan();
@@ -117,8 +117,8 @@ btnScan.addEventListener('click', async () => {
   activeTabId = tab.id;
   clearScan();
   scanError.hidden = true;
-  btnScan.textContent = 'Scanning...';
-  btnScan.disabled = true;
+  btnScan.textContent = 'Restart scan';
+  btnScan.disabled = false;
   chrome.runtime.sendMessage({ action: 'scan', tabId: tab.id });
 });
 

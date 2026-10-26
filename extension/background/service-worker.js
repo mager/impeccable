@@ -184,8 +184,12 @@ async function sendScanToTab(tabId) {
     reportScanFailure(tabId, `Couldn’t start the rule core: ${err?.message || err}`);
     return;
   }
-  const config = await buildScanConfig();
-  chrome.tabs.sendMessage(tabId, { action: 'scan', config }).catch(() => {});
+  try {
+    const config = await buildScanConfig();
+    await chrome.tabs.sendMessage(tabId, { action: 'scan', config });
+  } catch (err) {
+    reportScanFailure(tabId, `Couldn’t start the scan: ${err?.message || err}`);
+  }
 }
 
 // Handle messages from content scripts and popup

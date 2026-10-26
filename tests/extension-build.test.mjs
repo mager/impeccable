@@ -9,7 +9,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // Run the real worker with browser API boundaries replaced. Firefox exposes
 // getContexts, but rejects OFFSCREEN_DOCUMENT before the scan can start.
-function scannerHarness({ firefox = false, existingHost = false, failFirstCreate = false, ping } = {}) {
+function scannerHarness({ firefox = false, existingHost = false, failFirstCreate = false, failScanDelivery = false, ping } = {}) {
   const runtimeMessages = [];
   const tabMessages = [];
   const frames = [];
@@ -37,7 +37,10 @@ function scannerHarness({ firefox = false, existingHost = false, failFirstCreate
     storage: { sync: { async get(defaults) { return defaults; } } },
     tabs: {
       onRemoved: event(),
-      async sendMessage(tabId, message) { tabMessages.push({ tabId, ...message }); },
+      async sendMessage(tabId, message) {
+        tabMessages.push({ tabId, ...message });
+        if (failScanDelivery && message.action === 'scan') throw new Error('Receiving end does not exist');
+      },
     },
   };
   function create() {
@@ -250,6 +253,15 @@ describe('extension popup scan state', () => {
     assert.equal(state(h).findings.length, 0);
     assert.equal(state(h).scanning, false);
     assert.equal(state(h).scanError, 'Snapshot failed');
+  });
+
+  it('reports scan delivery failure and clears pending state for a reopened popup', async () => {
+    const h = scannerHarness({ failScanDelivery: true });
+    await vm.runInContext('sendScanToTab(7)', h.context);
+    assert.equal(state(h).scanning, false);
+    assert.equal(state(h).scanComplete, false);
+    assert.match(state(h).scanError, /Receiving end does not exist/);
+    assert.ok(h.runtimeMessages.some(message => message.action === 'scan-failed' && message.tabId === 7));
   });
 
   it('clears source URL and scan state on top-level navigation and notifies the popup', () => {
