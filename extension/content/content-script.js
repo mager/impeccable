@@ -100,9 +100,10 @@
     return out;
   }
 
-  function postFindings(serialized) {
+  function postFindings(serialized, scanComplete = false) {
     chrome.runtime.sendMessage({
       action: 'findings',
+      scanComplete,
       findings: serialized,
       count: serialized.length,
       stats: lastStats,
@@ -196,13 +197,15 @@
     capture = cap;
     visualIO = snapshot.visualIO(cap);
     lastStats = { elements: cap.stats.elements, bytes: cap.stats.bytes, captureMs: cap.stats.ms, coreMs: null, visualMs: null, rounds: 1, hitTests: 0, ioAsks: 0, unknownStyleProps: [], startedAt: performance.now(), findingsAtMs: null, visualAtMs: null };
-    await drive({ action: 'scan-start', snapshot: cap.json, config: config || {} }, sessionId, async (r) => {
+    let serialized = [];
+    const result = await drive({ action: 'scan-start', snapshot: cap.json, config: config || {} }, sessionId, async (r) => {
       if (generation !== scanGeneration) return;
       if (r.stats) {
         if (r.stats.coreMs !== undefined) lastStats.coreMs = r.stats.coreMs;
         if (r.stats.visualMs !== undefined) lastStats.visualMs = r.stats.visualMs;
         if (r.stats.unknownStyleProps) lastStats.unknownStyleProps = r.stats.unknownStyleProps;
       }
+      if (r.serialized) serialized = r.serialized;
       if (r.stage === 'findings') {
         lastStats.findingsAtMs = performance.now() - lastStats.startedAt;
         setGroups(r.groups);
@@ -219,6 +222,9 @@
         scheduleLazy(r.lazy || [], generation);
       }
     });
+    // The core can skip the visual stage. Only its final reply establishes
+    // completion; partial results remain useful for overlays and counts.
+    if (result?.done && generation === scanGeneration) postFindings(serialized, true);
   }
 
   async function analyzeCandidate(candidate, generation) {
@@ -243,7 +249,7 @@
         if (el && group) {
           groupMap.set(el, group.findings);
           if (el !== document.body && el !== document.documentElement) ui.highlight(el, group.findings);
-          if (out.serialized) postFindings(out.serialized);
+          if (out.serialized) postFindings(out.serialized, true);
         }
       }
     } finally {

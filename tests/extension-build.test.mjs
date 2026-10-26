@@ -205,14 +205,24 @@ describe('extension badge colors', () => {
 
 describe('extension popup scan state', () => {
   const url = 'https://example.test/scanned#card';
-  function report(h, findings = []) {
-    h.listeners.message({ action: 'findings', findings }, { url, tab: { id: 7 } }, () => {});
+  function report(h, findings = [], scanComplete = true) {
+    h.listeners.message({ action: 'findings', findings, scanComplete }, { url, tab: { id: 7 } }, () => {});
   }
   function state(h) {
     let result;
     h.listeners.message({ action: 'get-state', tabId: 7 }, {}, value => { result = value; });
     return result;
   }
+
+  it('keeps partial scan reports incomplete until the final result', () => {
+    const h = scannerHarness();
+    report(h, [], false);
+    assert.equal(state(h).scanComplete, false);
+    assert.equal(h.runtimeMessages.at(-1).scanComplete, false);
+    report(h);
+    assert.equal(state(h).scanComplete, true);
+    assert.equal(h.runtimeMessages.at(-1).scanComplete, true);
+  });
 
   it('marks an empty scan complete and includes the source URL in popup broadcasts', () => {
     const h = scannerHarness();
@@ -246,5 +256,89 @@ describe('extension popup scan state', () => {
     assert.equal(state(h).scanComplete, false);
     assert.equal(state(h).url, '');
     assert.ok(h.runtimeMessages.some(message => message.action === 'navigated' && message.tabId === 7));
+  });
+});
+
+// Exercise the real content script across the offscreen protocol, including a
+// delayed image read. No generated detector code is replaced in production.
+function contentScanHarness({ visual = true, fail = false } = {}) {
+  const messages = [];
+  let listener;
+  let releaseImage;
+  const image = new Promise(resolve => { releaseImage = resolve; });
+  let step = 0;
+  const initial = [{ selector: '#text', findings: [] }];
+  const final = [{ selector: '#text', findings: [{ type: 'low-contrast' }] }];
+  const overlay = { remove() {}, clearOverlays() {}, highlight() {}, setFirstScanDone() {}, showPageBanner() {} };
+  const context = vm.createContext({
+    window: {
+      __impeccableSnapshot: {
+        capture: () => ({ json: '{}', elements: {}, stats: { elements: 1, bytes: 2, ms: 0 } }),
+        visualIO: () => ({ loadImage: () => image }),
+      },
+      __impeccableCreateOverlay: () => overlay,
+      addEventListener() {},
+    },
+    document: { body: {}, documentElement: {}, addEventListener() {} },
+    location: { href: 'https://example.test/' }, performance,
+    setTimeout() {},
+    chrome: { runtime: {
+      onMessage: { addListener(fn) { listener = fn; } },
+      async sendMessage(msg) {
+        messages.push(msg);
+        if (msg.action === 'antipatterns') return { antipatterns: [] };
+        if (msg.action === 'scan-start') return { stage: 'findings', groups: [], serialized: initial };
+        if (msg.action === 'scan-continue') {
+          if (!visual) return { done: true };
+          if (++step === 1) return { ask: { io: { kind: 'loadImage', src: '/slow.png' } } };
+          if (fail) return { error: 'Image read failed' };
+          if (step === 2) return { stage: 'visual', groups: [], added: [], serialized: final };
+          return { done: true };
+        }
+      },
+    } },
+  });
+  vm.runInContext(readFileSync(path.join(ROOT, 'extension/content/content-script.js'), 'utf8'), context);
+  listener({ action: 'scan' }, {}, () => {});
+  return { messages, releaseImage, listener };
+}
+const nextTurn = () => new Promise(resolve => setImmediate(resolve));
+
+describe('content script scan completion', () => {
+  it('keeps delayed image findings partial and publishes a complete final report', async () => {
+    const h = contentScanHarness();
+    await nextTurn();
+    let reports = h.messages.filter(m => m.action === 'findings');
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].scanComplete, false);
+    h.releaseImage({});
+    await nextTurn();
+    reports = h.messages.filter(m => m.action === 'findings');
+    assert.deepEqual(reports.map(m => m.scanComplete), [false, false, true]);
+    assert.equal(reports.at(-1).findings[0].findings[0].type, 'low-contrast');
+  });
+
+  it('completes when the core skips visual checks', async () => {
+    const h = contentScanHarness({ visual: false });
+    await nextTurn();
+    assert.deepEqual(h.messages.filter(m => m.action === 'findings').map(m => m.scanComplete), [false, true]);
+  });
+
+  it('never marks a failed visual pass complete', async () => {
+    const h = contentScanHarness({ fail: true });
+    await nextTurn();
+    h.releaseImage({});
+    await nextTurn();
+    assert.equal(h.messages.some(m => m.scanComplete), false);
+    assert.equal(h.messages.find(m => m.action === 'detector-error').message, 'Image read failed');
+  });
+
+  it('does not complete a scan after the content script is removed', async () => {
+    const h = contentScanHarness();
+    await nextTurn();
+    h.listener({ action: 'remove' }, {}, () => {});
+    h.releaseImage({});
+    await nextTurn();
+    assert.equal(h.messages.filter(m => m.action === 'findings' && m.scanComplete).length, 0);
   });
 });

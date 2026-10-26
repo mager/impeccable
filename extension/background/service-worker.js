@@ -198,13 +198,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     const state = getState(tabId);
     state.findings = msg.findings || [];
     state.url = sender.url || sender.tab?.url || '';
-    state.scanComplete = true;
+    state.scanComplete = msg.scanComplete === true;
     state.injected = true;
     if (msg.stats) state.stats = msg.stats;
     updateBadge(tabId);
     notifyPanels(tabId, { action: 'findings', findings: state.findings });
     // Broadcast for popup
-    chrome.runtime.sendMessage({ action: 'findings-updated', tabId, findings: state.findings, url: state.url }).catch(() => {});
+    chrome.runtime.sendMessage({ action: 'findings-updated', tabId, findings: state.findings, url: state.url, scanComplete: state.scanComplete }).catch(() => {});
     sendResponse({ ok: true });
   }
 

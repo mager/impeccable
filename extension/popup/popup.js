@@ -50,7 +50,7 @@ function updateFromState(state) {
     : null;
   btnCopyAll.disabled = !currentScan;
   showCopyStatus('');
-  updateFindings(currentScan?.findings || []);
+  updateFindings(state.findings || []);
   overlaysVisible = state.overlaysVisible !== false;
   btnToggle.textContent = overlaysVisible ? 'Hide overlays' : 'Show overlays';
 }
@@ -63,8 +63,9 @@ async function loadState() {
   chrome.runtime.sendMessage({ action: 'get-state', tabId: tab.id }, state => {
     // A scan or navigation broadcast may arrive before this callback.
     if (requestedAt !== revision) return;
-    if (tab.status === 'loading' || state?.url !== tab.url) clearScan();
-    else updateFromState(state);
+    // Overlay visibility belongs to the tab, independent of scan validity.
+    const validScan = tab.status !== 'loading' && state?.url === tab.url;
+    updateFromState({ ...state, ...(!validScan && { findings: [], scanComplete: false }) });
   });
 }
 
@@ -72,9 +73,9 @@ chrome.runtime.onMessage.addListener((msg) => {
   // Unscoped messages and background tabs cannot supply this popup's report.
   if (activeTabId == null || msg.tabId !== activeTabId) return;
   if (msg.action === 'findings-updated') {
-    updateFromState({ ...msg, scanComplete: true, overlaysVisible });
-    btnScan.textContent = 'Scan page';
-    btnScan.disabled = false;
+    updateFromState({ ...msg, overlaysVisible });
+    btnScan.textContent = msg.scanComplete ? 'Scan page' : 'Scanning...';
+    btnScan.disabled = !msg.scanComplete;
     scanError.hidden = true;
   }
   if (msg.action === 'scan-started' || msg.action === 'navigated') {

@@ -174,3 +174,32 @@ test('an old clipboard completion cannot mark a newer report copied', async () =
   assert.equal(h.node('copy-status').textContent, '');
   assert.equal(h.node('btn-copy-all').disabled, false);
 });
+
+
+test('partial findings stay visible but cannot be copied before the visual pass completes', async () => {
+  const h = await popup();
+  await h.click('btn-scan');
+  h.broadcast({ action: 'findings-updated', tabId: 7, ...state([]), scanComplete: false });
+  assert.equal(h.node('btn-copy-all').disabled, true);
+  assert.equal(h.node('btn-scan').disabled, true);
+  await h.click('btn-copy-all');
+  assert.equal(h.writes.length, 0);
+  h.broadcast({ action: 'findings-updated', tabId: 7, ...state(), scanComplete: false });
+  assert.equal(h.node('count-number').textContent, '2');
+  assert.equal(h.node('btn-copy-all').disabled, true);
+  h.broadcast({ action: 'findings-updated', tabId: 7, ...state() });
+  await h.click('btn-copy-all');
+  assert.match(h.writes[0], /Total findings: 2/);
+});
+
+for (const url of ['', 'https://example.test/previous']) {
+  test(`restores hidden overlays without trusting stale scan URL ${url}`, async () => {
+    const h = await popup({ initial: { ...state(), url, overlaysVisible: false } });
+    assert.equal(h.node('btn-toggle').textContent, 'Show overlays');
+    assert.equal(h.node('btn-copy-all').disabled, true);
+    h.broadcast({ action: 'findings-updated', tabId: 7, ...state() });
+    assert.equal(h.node('btn-toggle').textContent, 'Show overlays');
+    await h.click('btn-toggle');
+    assert.equal(h.node('btn-toggle').textContent, 'Hide overlays');
+  });
+}
