@@ -77,7 +77,16 @@ fn comparison(left: f64, op: &[Term], right: f64) -> Option<bool> {
 
 fn feature(t: &[Term]) -> Option<bool> {
     match t {
-        [Term::Ident(name)] if name == "width" || name == "height" => Some(true),
+        // These supported features have no zero/none value in this environment.
+        // https://www.w3.org/TR/mediaqueries-5/#mq-boolean-context
+        [Term::Ident(name)]
+            if matches!(
+                name.as_str(),
+                "width" | "height" | "orientation" | "prefers-color-scheme"
+            ) =>
+        {
+            Some(true)
+        }
         [Term::Ident(name), Term::Mark(':'), Term::Ident(value)] => match name.as_str() {
             "prefers-color-scheme" => match value.as_str() {
                 "light" => Some(true),

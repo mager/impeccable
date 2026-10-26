@@ -188,3 +188,30 @@ fn negative_dimension_fixture_reports_only_the_four_active_cases() {
         "{findings:?}"
     );
 }
+
+#[test]
+fn boolean_discrete_features_keep_active_contrast_styles() {
+    for query in [
+        "(orientation)",
+        "(prefers-color-scheme)",
+        "screen and (orientation) and (prefers-color-scheme)",
+    ] {
+        assert_eq!(
+            contrast_count(&format!("@media {query}{{body{{color:#eee}}}}")),
+            1,
+            "{query}"
+        );
+    }
+    for query in [
+        "not (orientation)",
+        "not (prefers-color-scheme)",
+        "(unsupported-feature)",
+        "not (unsupported-feature)",
+    ] {
+        assert_eq!(
+            contrast_count(&format!("@media {query}{{body{{color:#eee}}}}")),
+            0,
+            "{query}"
+        );
+    }
+}
