@@ -51,6 +51,10 @@ function updateFromState(state) {
   btnCopyAll.disabled = !currentScan;
   showCopyStatus('');
   updateFindings(state.findings || []);
+  btnScan.textContent = state.scanning ? 'Scanning...' : 'Scan page';
+  btnScan.disabled = !!state.scanning;
+  scanError.textContent = state.scanError || '';
+  scanError.hidden = !state.scanError;
   overlaysVisible = state.overlaysVisible !== false;
   btnToggle.textContent = overlaysVisible ? 'Hide overlays' : 'Show overlays';
 }
@@ -80,6 +84,9 @@ chrome.runtime.onMessage.addListener((msg) => {
   }
   if (msg.action === 'scan-started' || msg.action === 'navigated') {
     clearScan();
+    scanError.hidden = true;
+    btnScan.textContent = msg.action === 'scan-started' ? 'Scanning...' : 'Scan page';
+    btnScan.disabled = msg.action === 'scan-started';
   }
   if (msg.action === 'scan-failed') {
     clearScan();
@@ -98,6 +105,7 @@ chrome.runtime.onMessage.addListener((msg) => {
 chrome.tabs.onUpdated.addListener((tabId, change) => {
   if (tabId === activeTabId && (change.status === 'loading' || change.url)) {
     clearScan();
+    scanError.hidden = true;
     btnScan.textContent = 'Scan page';
     btnScan.disabled = false;
   }

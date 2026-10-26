@@ -19,7 +19,7 @@ const OFFSCREEN_URL = 'offscreen/offscreen.html';
 
 function getState(tabId) {
   if (!tabState.has(tabId)) {
-    tabState.set(tabId, { findings: [], url: '', scanComplete: false, overlaysVisible: true, injected: false, csInjected: false });
+    tabState.set(tabId, { findings: [], url: '', scanComplete: false, scanning: false, scanError: null, overlaysVisible: true, injected: false, csInjected: false });
   }
   return tabState.get(tabId);
 }
@@ -155,13 +155,15 @@ async function ensureContentScriptInjected(tabId) {
 }
 
 function reportScanFailure(tabId, message) {
-  getState(tabId).scanComplete = false;
+  Object.assign(getState(tabId), { findings: [], url: '', scanComplete: false, scanning: false, scanError: message });
+  updateBadge(tabId);
   chrome.runtime.sendMessage({ action: 'scan-failed', tabId, message }).catch(() => {});
   notifyPanels(tabId, { action: 'scan-failed', message });
 }
 
 async function sendScanToTab(tabId) {
-  getState(tabId).scanComplete = false;
+  Object.assign(getState(tabId), { findings: [], url: '', scanComplete: false, scanning: true, scanError: null });
+  updateBadge(tabId);
   chrome.runtime.sendMessage({ action: 'scan-started', tabId }).catch(() => {});
   const { ok, error } = await ensureContentScriptInjected(tabId);
   if (!ok) {
@@ -199,6 +201,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     state.findings = msg.findings || [];
     state.url = sender.url || sender.tab?.url || '';
     state.scanComplete = msg.scanComplete === true;
+    state.scanning = !state.scanComplete;
+    state.scanError = null;
     state.injected = true;
     if (msg.stats) state.stats = msg.stats;
     updateBadge(tabId);
@@ -268,6 +272,8 @@ async function tearDownTab(tabId) {
     state.findings = [];
     state.url = '';
     state.scanComplete = false;
+    state.scanning = false;
+    state.scanError = null;
     state.injected = false;
     state.csInjected = false;
   }
@@ -363,6 +369,8 @@ chrome.webNavigation?.onCompleted?.addListener((details) => {
   state.findings = [];
   state.url = '';
   state.scanComplete = false;
+  state.scanning = false;
+  state.scanError = null;
   state.injected = false;
   state.csInjected = false;
   updateBadge(details.tabId);

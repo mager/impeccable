@@ -203,3 +203,18 @@ for (const url of ['', 'https://example.test/previous']) {
     assert.equal(h.node('btn-toggle').textContent, 'Hide overlays');
   });
 }
+
+test('reopening restores scan progress and a failed scan message without old findings', async () => {
+  const pending = await popup({ initial: { findings: [], url: '', scanComplete: false, scanning: true } });
+  assert.equal(pending.node('count-number').textContent, '0');
+  assert.equal(pending.node('btn-scan').textContent, 'Scanning...');
+  assert.equal(pending.node('btn-scan').disabled, true);
+  const failed = await popup({ initial: { findings: [], url: '', scanComplete: false, scanning: false, scanError: 'Snapshot failed' } });
+  assert.equal(failed.node('count-number').textContent, '0');
+  assert.equal(failed.node('btn-copy-all').disabled, true);
+  assert.equal(failed.node('btn-scan').disabled, false);
+  assert.equal(failed.node('scan-error').textContent, 'Snapshot failed');
+  assert.equal(failed.node('scan-error').hidden, false);
+  failed.broadcast({ action: 'scan-started', tabId: 7 });
+  assert.equal(failed.node('scan-error').hidden, true);
+});

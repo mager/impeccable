@@ -238,13 +238,18 @@ describe('extension popup scan state', () => {
 
   it('invalidates cached copy data while scanning and after failure', async () => {
     const h = scannerHarness();
-    report(h);
+    report(h, [{ findings: [{ name: 'Old finding' }] }]);
     await vm.runInContext('sendScanToTab(7)', h.context);
+    assert.equal(state(h).findings.length, 0);
+    assert.equal(state(h).scanning, true);
     assert.equal(state(h).scanComplete, false);
     assert.ok(h.runtimeMessages.some(message => message.action === 'scan-started' && message.tabId === 7));
-    report(h);
+    report(h, [{ findings: [{ name: 'Old finding' }] }]);
     h.listeners.message({ action: 'detector-error', message: 'Snapshot failed' }, { tab: { id: 7 } }, () => {});
     assert.equal(state(h).scanComplete, false);
+    assert.equal(state(h).findings.length, 0);
+    assert.equal(state(h).scanning, false);
+    assert.equal(state(h).scanError, 'Snapshot failed');
   });
 
   it('clears source URL and scan state on top-level navigation and notifies the popup', () => {
