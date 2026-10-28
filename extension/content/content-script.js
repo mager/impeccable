@@ -84,6 +84,11 @@
     return capture ? capture.elements[id] || null : null;
   }
 
+  // Elements a counted finding speaks for (` (and N more)`), which the
+  // visual pass treats as reported; kept as elements so a later capture's
+  // ids can name them.
+  let collapsedEls = [];
+
   function setGroups(groups) {
     groupMap.clear();
     for (const g of groups) {
@@ -214,6 +219,7 @@
       if (r.serialized) serialized = r.serialized;
       if (r.stage === 'findings') {
         lastStats.findingsAtMs = performance.now() - lastStats.startedAt;
+        collapsedEls = (r.collapsed || []).map(elementOf).filter(Boolean);
         setGroups(r.groups);
         drawGroups(r.groups);
         if (r.pageLevel && r.pageLevel.length) ui.showPageBanner(r.pageLevel);
@@ -247,6 +253,7 @@
         snapshot: cap.json,
         candidate,
         groups: groupsForCapture(cap),
+        collapsed: collapsedEls.map(el => snapshot.idOf(el, cap)).filter(Boolean),
       }, candidateSessionId, async () => {}, generation);
       if (!out || generation !== scanGeneration) return;
       if (out.el) {
