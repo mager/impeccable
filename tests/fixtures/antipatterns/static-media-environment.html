@@ -12,15 +12,16 @@
     h2 { font-size: 24px; }
     h3 { font-size: 20px; }
     p { color: #111; background: #fff; }
-    @media screen { #flag-screen p { color: #eee; } }
-    @media (prefers-color-scheme: light) { #flag-light p { color: #eee; } }
-    @media (min-width: 1280px) { #flag-width p { color: #eee; } }
-    @media print, screen and (width <= 1280px) { #flag-list p { color: #eee; } }
-    @media print { #pass-print p { color: #eee; } }
-    @media (prefers-color-scheme: dark) { #pass-dark p { color: #eee; } }
-    @media (max-width: 1279px) { #pass-narrow p { color: #eee; } }
-    @media (unrecognized-feature: yes) { #pass-unknown p { color: #eee; } }
-    @media not (unrecognized-feature: yes) { #pass-negated-unknown p { color: #eee; } }
+    /* Each case has its own ink so pair deduplication cannot hide a media regression. */
+    @media screen { #flag-screen p { color: #eeeeee; } }
+    @media (prefers-color-scheme: light) { #flag-light p { color: #ededed; } }
+    @media (min-width: 1280px) { #flag-width p { color: #ececec; } }
+    @media print, screen and (width <= 1280px) { #flag-list p { color: #ebebeb; } }
+    @media print { #pass-print p { color: #eaeaea; } }
+    @media (prefers-color-scheme: dark) { #pass-dark p { color: #e9e9e9; } }
+    @media (max-width: 1279px) { #pass-narrow p { color: #e8e8e8; } }
+    @media (unrecognized-feature: yes) { #pass-unknown p { color: #e7e7e7; } }
+    @media not (unrecognized-feature: yes) { #pass-negated-unknown p { color: #e6e6e6; } }
   </style>
 </head>
 <body>
