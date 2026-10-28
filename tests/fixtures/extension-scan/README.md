@@ -63,3 +63,16 @@ separately; the shared detector bundle does not make their hosting APIs identica
 - Clipboard rejection and delayed scan/navigation messages are covered by
   `tests/extension-popup.test.mjs`; success in a stubbed clipboard is not a
   substitute for the real Chrome and Firefox copy-and-paste checks above.
+
+## Restart during visual analysis
+
+On a page with text over a background image, start a scan while image loading is
+slow. Copy must remain disabled during the visual pass. Select **Restart scan**
+and let the new scan finish. When the old image request finishes or fails, the
+new findings must remain available; no old error may clear them or enable Copy
+for an incomplete replacement. Repeat after closing and reopening the popup.
+
+`tests/extension-build.test.mjs` controls this order directly: it holds an image
+answer open, starts a replacement, then releases or rejects the old answer. It
+also checks stale findings/errors, late message rejection, late injection, and
+navigation at the background worker boundary.

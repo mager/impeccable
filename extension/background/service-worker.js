@@ -19,7 +19,7 @@ const OFFSCREEN_URL = 'offscreen/offscreen.html';
 
 function getState(tabId) {
   if (!tabState.has(tabId)) {
-    tabState.set(tabId, { findings: [], url: '', scanComplete: false, scanning: false, scanError: null, overlaysVisible: true, injected: false, csInjected: false });
+    tabState.set(tabId, { findings: [], url: '', scanId: null, scanComplete: false, scanning: false, scanError: null, overlaysVisible: true, injected: false, csInjected: false });
   }
   return tabState.get(tabId);
 }
@@ -135,7 +135,7 @@ async function ensureOffscreenDocument() {
 // engages with the extension (DevTools panel/sidebar opened, popup scan, etc).
 // The three detector pieces (snapshot producer, overlay UI, content script)
 // share the isolated world; each is idempotent.
-async function ensureContentScriptInjected(tabId) {
+async function ensureContentScriptInjected(tabId, scanId) {
   const state = getState(tabId);
   if (state.csInjected) return { ok: true };
   try {
@@ -144,7 +144,7 @@ async function ensureContentScriptInjected(tabId) {
       files: ['detector/snapshot.js', 'detector/overlay.js', 'content/content-script.js'],
       injectImmediately: true,
     });
-    state.csInjected = true;
+    if (tabState.get(tabId) === state && state.scanId === scanId) state.csInjected = true;
     return { ok: true };
   } catch (err) {
     // Common cause: chrome:// pages, the web store, the Chrome Web Store, or
@@ -154,18 +154,24 @@ async function ensureContentScriptInjected(tabId) {
   }
 }
 
-function reportScanFailure(tabId, message) {
-  Object.assign(getState(tabId), { findings: [], url: '', scanComplete: false, scanning: false, scanError: message });
+function reportScanFailure(tabId, message, scanId) {
+  const state = tabState.get(tabId);
+  if (!scanId || state?.scanId !== scanId) return;
+  Object.assign(state, { findings: [], url: '', scanComplete: false, scanning: false, scanError: message });
   updateBadge(tabId);
   chrome.runtime.sendMessage({ action: 'scan-failed', tabId, message }).catch(() => {});
   notifyPanels(tabId, { action: 'scan-failed', message });
 }
 
 async function sendScanToTab(tabId) {
-  Object.assign(getState(tabId), { findings: [], url: '', scanComplete: false, scanning: true, scanError: null });
+  const state = getState(tabId);
+  const scanId = crypto.randomUUID();
+  const isCurrent = () => tabState.get(tabId) === state && state.scanId === scanId;
+  Object.assign(state, { scanId, findings: [], url: '', scanComplete: false, scanning: true, scanError: null });
   updateBadge(tabId);
   chrome.runtime.sendMessage({ action: 'scan-started', tabId }).catch(() => {});
-  const { ok, error } = await ensureContentScriptInjected(tabId);
+  const { ok, error } = await ensureContentScriptInjected(tabId, scanId);
+  if (!isCurrent()) return;
   if (!ok) {
     // Injection was blocked. Tell an open popup why so it can stop showing
     // "Scanning..." and surface a hint. The popup may be closed, so ignore
@@ -175,20 +181,22 @@ async function sendScanToTab(tabId) {
     const message = url.startsWith('file:')
       ? 'Can’t scan local files. Enable “Allow access to file URLs” for Impeccable in chrome://extensions.'
       : `Couldn’t scan this page${error ? `: ${error}` : '.'}`;
-    reportScanFailure(tabId, message);
+    reportScanFailure(tabId, message, scanId);
     return;
   }
   try {
     await ensureOffscreenDocument();
   } catch (err) {
-    reportScanFailure(tabId, `Couldn’t start the rule core: ${err?.message || err}`);
+    reportScanFailure(tabId, `Couldn’t start the rule core: ${err?.message || err}`, scanId);
     return;
   }
   try {
+    if (!isCurrent()) return;
     const config = await buildScanConfig();
-    await chrome.tabs.sendMessage(tabId, { action: 'scan', config });
+    if (!isCurrent()) return;
+    await chrome.tabs.sendMessage(tabId, { action: 'scan', config, scanId });
   } catch (err) {
-    reportScanFailure(tabId, `Couldn’t start the scan: ${err?.message || err}`);
+    reportScanFailure(tabId, `Couldn’t start the scan: ${err?.message || err}`, scanId);
   }
 }
 
@@ -201,7 +209,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = msg.tabId || sender.tab?.id;
 
   if (msg.action === 'findings' && tabId) {
-    const state = getState(tabId);
+    const state = tabState.get(tabId);
+    if (!msg.scanId || state?.scanId !== msg.scanId) {
+      sendResponse({ ok: true });
+      return;
+    }
     state.findings = msg.findings || [];
     state.url = sender.url || sender.tab?.url || '';
     state.scanComplete = msg.scanComplete === true;
@@ -246,7 +258,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   else if (msg.action === 'detector-error' && tabId) {
     // The content script could not complete a scan (snapshot too large, the
     // core refused the snapshot, ...). Tell the popup and any open panel.
-    reportScanFailure(tabId, msg.message || 'The detector could not run on this page.');
+    reportScanFailure(tabId, msg.message || 'The detector could not run on this page.', msg.scanId);
     sendResponse({ ok: true });
   }
 
@@ -266,6 +278,8 @@ const devtoolsTabs = new Set();
 
 async function tearDownTab(tabId) {
   devtoolsTabs.delete(tabId);
+  const activeState = tabState.get(tabId);
+  if (activeState) activeState.scanId = null;
   // Send the remove command and await it — this keeps the SW alive long enough
   // to actually deliver the message (setTimeout doesn't survive SW termination in MV3).
   try {
@@ -370,6 +384,7 @@ chrome.webNavigation?.onCompleted?.addListener((details) => {
   // Always clear: the content script is gone after reload, full stop. Skipping this when
   // DevTools wasn't open meant the popup-only flow saw a stale csInjected: true on the
   // second click and silently no-op'd against a tab that had no listener.
+  state.scanId = null;
   state.findings = [];
   state.url = '';
   state.scanComplete = false;

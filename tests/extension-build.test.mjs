@@ -4,12 +4,13 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import vm from 'node:vm';
+import { webcrypto } from 'node:crypto';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // Run the real worker with browser API boundaries replaced. Firefox exposes
 // getContexts, but rejects OFFSCREEN_DOCUMENT before the scan can start.
-function scannerHarness({ firefox = false, existingHost = false, failFirstCreate = false, failScanDelivery = false, ping } = {}) {
+function scannerHarness({ firefox = false, existingHost = false, failFirstCreate = false, failScanDelivery = false, deliverScan, inject, ping } = {}) {
   const runtimeMessages = [];
   const tabMessages = [];
   const frames = [];
@@ -33,13 +34,14 @@ function scannerHarness({ firefox = false, existingHost = false, failFirstCreate
     },
     action: { async setBadgeText() {}, async setBadgeBackgroundColor() {} },
     webNavigation: { onCompleted: event('navigation') },
-    scripting: { async executeScript() {} },
+    scripting: { async executeScript() { if (inject) await inject(); } },
     storage: { sync: { async get(defaults) { return defaults; } } },
     tabs: {
       onRemoved: event(),
       async sendMessage(tabId, message) {
         tabMessages.push({ tabId, ...message });
         if (failScanDelivery && message.action === 'scan') throw new Error('Receiving end does not exist');
+        if (deliverScan && message.action === 'scan') return deliverScan(message);
       },
     },
   };
@@ -54,7 +56,7 @@ function scannerHarness({ firefox = false, existingHost = false, failFirstCreate
     body: { appendChild(frame) { create(); frames.push(frame); } },
   } : undefined;
   if (!firefox) chrome.offscreen = { async createDocument() { create(); } };
-  const context = vm.createContext({ chrome, document, setTimeout });
+  const context = vm.createContext({ chrome, document, setTimeout, crypto: webcrypto });
   vm.runInContext(readFileSync(path.join(ROOT, 'extension/background/service-worker.js'), 'utf8'), context);
   return { context, frames, runtimeMessages, tabMessages, listeners, creates: () => creates };
 }
@@ -209,7 +211,8 @@ describe('extension badge colors', () => {
 describe('extension popup scan state', () => {
   const url = 'https://example.test/scanned#card';
   function report(h, findings = [], scanComplete = true) {
-    h.listeners.message({ action: 'findings', findings, scanComplete }, { url, tab: { id: 7 } }, () => {});
+    const scanId = vm.runInContext("getState(7).scanId ||= 'test-scan'", h.context);
+    h.listeners.message({ action: 'findings', findings, scanComplete, scanId }, { url, tab: { id: 7 } }, () => {});
   }
   function state(h) {
     let result;
@@ -248,7 +251,7 @@ describe('extension popup scan state', () => {
     assert.equal(state(h).scanComplete, false);
     assert.ok(h.runtimeMessages.some(message => message.action === 'scan-started' && message.tabId === 7));
     report(h, [{ findings: [{ name: 'Old finding' }] }]);
-    h.listeners.message({ action: 'detector-error', message: 'Snapshot failed' }, { tab: { id: 7 } }, () => {});
+    h.listeners.message({ action: 'detector-error', scanId: state(h).scanId, message: 'Snapshot failed' }, { tab: { id: 7 } }, () => {});
     assert.equal(state(h).scanComplete, false);
     assert.equal(state(h).findings.length, 0);
     assert.equal(state(h).scanning, false);
@@ -359,3 +362,131 @@ describe('content script scan completion', () => {
     assert.equal(h.messages.filter(m => m.action === 'findings' && m.scanComplete).length, 0);
   });
 });
+
+
+describe('replacement scan isolation', () => {
+  function state(h) { return vm.runInContext('getState(7)', h.context); }
+  function deliver(h, scanId, action = 'findings') {
+    h.listeners.message({ action, scanId, scanComplete: true, findings: [{ selector: scanId, findings: [] }], message: 'Old scan failed' }, { url: 'https://example.test/', tab: { id: 7 } }, () => {});
+  }
+
+  it('ignores old and untagged reports and errors after a restart', async () => {
+    const h = scannerHarness();
+    await vm.runInContext('sendScanToTab(7)', h.context);
+    const first = h.tabMessages.at(-1).scanId;
+    await vm.runInContext('sendScanToTab(7)', h.context);
+    const second = h.tabMessages.at(-1).scanId;
+    assert.ok(first);
+    assert.notEqual(first, second);
+    deliver(h, first);
+    deliver(h, undefined);
+    assert.equal(state(h).scanComplete, false);
+    deliver(h, second);
+    for (const id of [first, undefined]) {
+      deliver(h, id);
+      deliver(h, id, 'detector-error');
+    }
+    assert.equal(state(h).scanComplete, true);
+    assert.equal(state(h).findings[0].selector, second);
+    assert.equal(state(h).scanError, null);
+  });
+
+  it('ignores a late scan-message rejection after the replacement completes', async () => {
+    let rejectFirst;
+    let calls = 0;
+    const h = scannerHarness({ deliverScan: () => ++calls === 1 ? new Promise((_, reject) => { rejectFirst = reject; }) : undefined });
+    const first = vm.runInContext('sendScanToTab(7)', h.context);
+    await nextTurn();
+    await vm.runInContext('sendScanToTab(7)', h.context);
+    const id = h.tabMessages.at(-1).scanId;
+    deliver(h, id);
+    rejectFirst(new Error('Old channel closed'));
+    await first;
+    assert.equal(state(h).scanComplete, true);
+    assert.equal(state(h).scanError, null);
+    assert.equal(state(h).findings[0].selector, id);
+  });
+
+  it('does not dispatch an old scan whose injection completes after its replacement', async () => {
+    let releaseFirst;
+    let calls = 0;
+    const h = scannerHarness({ inject: () => ++calls === 1 ? new Promise(resolve => { releaseFirst = resolve; }) : undefined });
+    const first = vm.runInContext('sendScanToTab(7)', h.context);
+    await nextTurn();
+    await vm.runInContext('sendScanToTab(7)', h.context);
+    const id = h.tabMessages.at(-1).scanId;
+    deliver(h, id);
+    releaseFirst();
+    await first;
+    assert.equal(h.tabMessages.filter(m => m.action === 'scan').length, 1);
+    assert.equal(state(h).scanComplete, true);
+    assert.equal(state(h).scanId, id);
+  });
+
+  it('does not accept reports after navigation invalidates their scan', async () => {
+    const h = scannerHarness();
+    await vm.runInContext('sendScanToTab(7)', h.context);
+    const id = h.tabMessages.at(-1).scanId;
+    h.listeners.navigation({ tabId: 7, frameId: 0 });
+    deliver(h, id);
+    assert.equal(state(h).scanComplete, false);
+    assert.equal(state(h).findings.length, 0);
+  });
+});
+
+function restartHarness({ rejectImage = false, replacementWaits = false } = {}) {
+  const messages = [];
+  let listener;
+  let finishImage;
+  const oldImage = new Promise((resolve, reject) => { finishImage = () => rejectImage ? reject(new Error('old image failed')) : resolve({}); });
+  let starts = 0;
+  let stage = 0;
+  const overlay = { clearOverlays() {}, highlight() {}, setFirstScanDone() {}, showPageBanner() {} };
+  const context = vm.createContext({
+    window: {
+      __impeccableSnapshot: {
+        capture: () => ({ json: '{}', elements: {}, stats: { elements: 1, bytes: 2, ms: 0 } }),
+        visualIO: () => ({ loadImage: src => src === 'old' ? oldImage : new Promise(() => {}) }),
+      },
+      __impeccableCreateOverlay: () => overlay, addEventListener() {},
+    },
+    document: { body: {}, documentElement: {}, addEventListener() {} },
+    location: { href: 'https://example.test/' }, performance, setTimeout() {},
+    chrome: { runtime: {
+      onMessage: { addListener(fn) { listener = fn; } },
+      async sendMessage(msg) {
+        messages.push(msg);
+        if (msg.action === 'antipatterns') return { antipatterns: [] };
+        if (msg.action === 'scan-start') {
+          starts++; stage = 0;
+          return { stage: 'findings', groups: [], serialized: [{ selector: `scan-${starts}`, findings: [] }] };
+        }
+        if (msg.action === 'scan-continue') {
+          if (++stage === 1 && (starts === 1 || replacementWaits)) return { ask: { io: { kind: 'loadImage', src: starts === 1 ? 'old' : 'new' } } };
+          if (stage > 2) return { error: 'no such session' };
+          return { done: true };
+        }
+      },
+    } },
+  });
+  vm.runInContext(readFileSync(path.join(ROOT, 'extension/content/content-script.js'), 'utf8'), context);
+  return { messages, finishImage, scan: id => listener({ action: 'scan', scanId: id }, {}, () => {}) };
+}
+
+for (const options of [{}, { rejectImage: true }, { replacementWaits: true }]) {
+  it(`stops the old image continuation after restart: ${JSON.stringify(options)}`, async () => {
+    const h = restartHarness(options);
+    h.scan('old');
+    await nextTurn();
+    h.scan('new');
+    await nextTurn();
+    const count = h.messages.filter(m => m.action === 'scan-continue').length;
+    h.finishImage();
+    await nextTurn();
+    assert.equal(h.messages.filter(m => m.action === 'scan-continue').length, count);
+    assert.equal(h.messages.some(m => m.action === 'detector-error'), false);
+    const complete = h.messages.filter(m => m.action === 'findings' && m.scanComplete);
+    assert.equal(complete.length, options.replacementWaits ? 0 : 1);
+    if (complete.length) assert.equal(complete[0].scanId, 'new');
+  });
+}

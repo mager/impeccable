@@ -34,10 +34,10 @@
   const candidateSessionId = `${sessionId}-lazy`;
 
   let injected = false;      // a scan has produced findings on this page
-  let scanConfig = null;
   let ui = null;
   let uiPromise = null;
   let scanGeneration = 0;
+  let scanId = null;
   let capture = null;        // the last capture (elements by snapshot id)
   let visualIO = null;
   const groupMap = new Map(); // Element -> findings[]
@@ -53,6 +53,7 @@
   function reportError(err) {
     chrome.runtime.sendMessage({
       action: 'detector-error',
+      scanId,
       message: err?.message || String(err),
     }).catch(() => {});
   }
@@ -103,6 +104,7 @@
   function postFindings(serialized, scanComplete = false) {
     chrome.runtime.sendMessage({
       action: 'findings',
+      scanId,
       scanComplete,
       findings: serialized,
       count: serialized.length,
@@ -142,7 +144,7 @@
         lazyResolving.add(el);
         waitForPaint()
           .then(() => analyzeCandidate(candidate, generation))
-          .catch(reportError)
+          .catch(err => { if (generation === scanGeneration) reportError(err); })
           .finally(() => lazyResolving.delete(el));
       }
     }, { threshold: 0.5 });
@@ -160,9 +162,11 @@
   }
 
   // Drive one offscreen session to completion, answering its asks.
-  async function drive(startMsg, sid, onStage) {
+  async function drive(startMsg, sid, onStage, generation) {
+    if (generation !== scanGeneration) return null;
     let r = await send({ ...startMsg, session: sid });
     for (;;) {
+      if (generation !== scanGeneration) return null;
       if (!r) throw new Error('the rule core did not answer');
       if (r.error) throw new Error(r.error);
       if (r.superseded) return null;
@@ -172,11 +176,13 @@
           else if (r.ask.io) lastStats.ioAsks += 1;
         }
         const a = await answer(r.ask);
+        if (generation !== scanGeneration) return null;
         r = await send({ action: 'scan-continue', session: sid, answer: a });
         continue;
       }
       if (r.stage) {
         await onStage(r);
+        if (generation !== scanGeneration) return null;
         r = await send({ action: 'scan-continue', session: sid, answer: {} });
         continue;
       }
@@ -184,9 +190,9 @@
     }
   }
 
-  async function runScan(config) {
+  async function runScan(config, id) {
     const generation = ++scanGeneration;
-    scanConfig = config || null;
+    scanId = id;
     window.__IMPECCABLE_CONFIG__ = config || {};
     await ensureUI();
     if (generation !== scanGeneration) return;
@@ -221,7 +227,7 @@
         postFindings(r.serialized);
         scheduleLazy(r.lazy || [], generation);
       }
-    });
+    }, generation);
     // The core can skip the visual stage. Only its final reply establishes
     // completion; partial results remain useful for overlays and counts.
     if (result?.done && generation === scanGeneration) postFindings(serialized, true);
@@ -241,7 +247,7 @@
         snapshot: cap.json,
         candidate,
         groups: groupsForCapture(cap),
-      }, candidateSessionId, async () => {});
+      }, candidateSessionId, async () => {}, generation);
       if (!out || generation !== scanGeneration) return;
       if (out.el) {
         const el = elementOf(out.el);
@@ -255,16 +261,19 @@
     } finally {
       // Later hit-test/pixel asks for the main session (none pending by now)
       // would need the main capture; restore it.
-      capture = priorCapture || capture;
-      visualIO = priorIO || visualIO;
+      if (generation === scanGeneration) {
+        capture = priorCapture || capture;
+        visualIO = priorIO || visualIO;
+      }
     }
   }
 
   // Listen for commands from the service worker
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.action === 'scan') {
-      runScan(msg.config || null).catch((err) => {
-        if (err && err.message === 'superseded') return;
+      const generation = scanGeneration + 1;
+      runScan(msg.config || null, msg.scanId).catch((err) => {
+        if (generation !== scanGeneration || (err && err.message === 'superseded')) return;
         reportError(err);
       });
       sendResponse({ ok: true });
@@ -309,8 +318,10 @@
     if (location.href === lastUrl) return;
     lastUrl = location.href;
     if (injected) {
-      // Re-scan after the DOM settles
-      setTimeout(() => runScan(scanConfig).catch(reportError), 500);
+      // Invalidate this run now; the worker assigns the replacement scan ID.
+      scanGeneration += 1;
+      disconnectLazy();
+      setTimeout(() => chrome.runtime.sendMessage({ action: 'scan' }).catch(() => {}), 500);
     }
   }
   window.addEventListener('popstate', onPossibleNavigation);
