@@ -42,7 +42,8 @@ impl Fixture {
         Self { root }
     }
     fn stamp(path: &Path, seconds: u64) {
-        fs::File::open(path)
+        // Windows requires a writable handle to change file timestamps.
+        fs::File::options().write(true).open(path)
             .unwrap()
             .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(seconds)))
             .unwrap();
