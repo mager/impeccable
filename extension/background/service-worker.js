@@ -19,9 +19,39 @@ const OFFSCREEN_URL = 'offscreen/offscreen.html';
 
 function getState(tabId) {
   if (!tabState.has(tabId)) {
-    tabState.set(tabId, { findings: [], url: '', scanId: null, scanComplete: false, scanning: false, scanError: null, overlaysVisible: true, injected: false, csInjected: false });
+    tabState.set(tabId, { findings: [], url: '', scanId: undefined, scanComplete: false, scanning: false, scanError: null, overlaysVisible: true, injected: false, csInjected: false });
   }
   return tabState.get(tabId);
+}
+
+// A page can outlive Chrome's worker. Ask the current document for its scan ID
+// only when this worker has no identity yet; null means explicitly invalidated.
+const scanRecoveries = new WeakMap();
+async function acceptScanMessage(tabId, scanId, apply) {
+  if (!scanId) return;
+  const state = getState(tabId);
+  if (state.scanId === undefined) {
+    let recovery = scanRecoveries.get(state);
+    if (!recovery) {
+      recovery = (async () => {
+        try {
+          const current = await chrome.tabs.sendMessage(tabId, { action: 'get-scan-id' });
+          if (tabState.get(tabId) === state && state.scanId === undefined && current?.scanId) {
+            state.scanId = current.scanId;
+            state.csInjected = true;
+          }
+        } catch { /* the page or its content script is gone */ }
+      })();
+      scanRecoveries.set(state, recovery);
+      void recovery.finally(() => scanRecoveries.delete(state));
+    }
+    await recovery;
+  }
+  if (tabState.get(tabId) === state && state.scanId === scanId) apply(state);
+}
+
+function cancelTabScans(tabId) {
+  return chrome.runtime.sendMessage({ target: 'impeccable-offscreen', action: 'scan-cancel-tab', tabId }).catch(() => {});
 }
 
 function updateBadge(tabId) {
@@ -170,6 +200,8 @@ async function sendScanToTab(tabId) {
   Object.assign(state, { scanId, findings: [], url: '', scanComplete: false, scanning: true, scanError: null });
   updateBadge(tabId);
   chrome.runtime.sendMessage({ action: 'scan-started', tabId }).catch(() => {});
+  await cancelTabScans(tabId);
+  if (!isCurrent()) return;
   const { ok, error } = await ensureContentScriptInjected(tabId, scanId);
   if (!isCurrent()) return;
   if (!ok) {
@@ -209,23 +241,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   const tabId = msg.tabId || sender.tab?.id;
 
   if (msg.action === 'findings' && tabId) {
-    const state = tabState.get(tabId);
-    if (!msg.scanId || state?.scanId !== msg.scanId) {
-      sendResponse({ ok: true });
-      return;
-    }
-    state.findings = msg.findings || [];
-    state.url = sender.url || sender.tab?.url || '';
-    state.scanComplete = msg.scanComplete === true;
-    state.scanning = !state.scanComplete;
-    state.scanError = null;
-    state.injected = true;
-    if (msg.stats) state.stats = msg.stats;
-    updateBadge(tabId);
-    notifyPanels(tabId, { action: 'findings', findings: state.findings });
-    // Broadcast for popup
-    chrome.runtime.sendMessage({ action: 'findings-updated', tabId, findings: state.findings, url: state.url, scanComplete: state.scanComplete }).catch(() => {});
-    sendResponse({ ok: true });
+    void acceptScanMessage(tabId, msg.scanId, (state) => {
+      state.findings = msg.findings || [];
+      state.url = sender.url || sender.tab?.url || '';
+      state.scanComplete = msg.scanComplete === true;
+      state.scanning = !state.scanComplete;
+      state.scanError = null;
+      state.injected = true;
+      if (msg.stats) state.stats = msg.stats;
+      updateBadge(tabId);
+      notifyPanels(tabId, { action: 'findings', findings: state.findings });
+      // Broadcast for popup
+      chrome.runtime.sendMessage({ action: 'findings-updated', tabId, findings: state.findings, url: state.url, scanComplete: state.scanComplete }).catch(() => {});
+    }).then(() => sendResponse({ ok: true }));
   }
 
   else if (msg.action === 'scan' && tabId) {
@@ -258,8 +286,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   else if (msg.action === 'detector-error' && tabId) {
     // The content script could not complete a scan (snapshot too large, the
     // core refused the snapshot, ...). Tell the popup and any open panel.
-    reportScanFailure(tabId, msg.message || 'The detector could not run on this page.', msg.scanId);
-    sendResponse({ ok: true });
+    void acceptScanMessage(tabId, msg.scanId, () => {
+      reportScanFailure(tabId, msg.message || 'The detector could not run on this page.', msg.scanId);
+    }).then(() => sendResponse({ ok: true }));
   }
 
   else if (msg.action === 'disabled-rules-changed') {
@@ -278,14 +307,17 @@ const devtoolsTabs = new Set();
 
 async function tearDownTab(tabId) {
   devtoolsTabs.delete(tabId);
-  const activeState = tabState.get(tabId);
-  if (activeState) activeState.scanId = null;
+  const activeState = getState(tabId);
+  activeState.scanId = null;
+  await cancelTabScans(tabId);
+  if (tabState.get(tabId) !== activeState || activeState?.scanId !== null) return;
   // Send the remove command and await it — this keeps the SW alive long enough
   // to actually deliver the message (setTimeout doesn't survive SW termination in MV3).
   try {
     await chrome.tabs.sendMessage(tabId, { action: 'remove' });
   } catch { /* tab might be closed or content script gone */ }
   const state = tabState.get(tabId);
+  if (state !== activeState || state?.scanId !== null) return;
   if (state) {
     state.findings = [];
     state.url = '';
@@ -375,6 +407,7 @@ chrome.runtime.onConnect.addListener((port) => {
 // on DevTools being open AND the user having previously engaged.
 chrome.webNavigation?.onCompleted?.addListener((details) => {
   if (details.frameId !== 0) return;
+  void cancelTabScans(details.tabId);
   const state = tabState.get(details.tabId);
   if (!state) return;
 
@@ -405,6 +438,7 @@ chrome.webNavigation?.onCompleted?.addListener((details) => {
 
 // Clean up state when tabs close
 chrome.tabs.onRemoved.addListener((tabId) => {
+  void cancelTabScans(tabId);
   tabState.delete(tabId);
   panelPorts.delete(tabId);
 });

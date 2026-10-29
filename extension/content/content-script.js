@@ -28,10 +28,12 @@
   const OFFSCREEN = 'impeccable-offscreen';
   const snapshot = window.__impeccableSnapshot;
   const createOverlay = window.__impeccableCreateOverlay;
-  // One session id per content-script instance: a re-scan supersedes the
-  // previous run of the same tab in the offscreen document.
+  // A page prefix plus a unique ID per driver run keeps late continuations
+  // from answering a replacement session. Cancellation releases the core queue.
   const sessionId = `tab-${Math.random().toString(36).slice(2)}`;
   const candidateSessionId = `${sessionId}-lazy`;
+  let sessionSequence = 0;
+  const activeSessions = new Set();
 
   let injected = false;      // a scan has produced findings on this page
   let ui = null;
@@ -42,13 +44,16 @@
   let visualIO = null;
   const groupMap = new Map(); // Element -> findings[]
   let lazyObserver = null;
-  const lazyPending = new WeakMap();
-  const lazyResolving = new WeakSet();
   // Measurements of the last scan (snapshot size, core time, ask rounds),
   // reported alongside the findings for diagnostics.
   let lastStats = null;
 
   const send = (msg) => chrome.runtime.sendMessage({ target: OFFSCREEN, ...msg });
+  const cancelScans = () => {
+    const sessions = [...activeSessions];
+    activeSessions.clear();
+    return Promise.all(sessions.map(session => send({ action: 'scan-cancel', session })));
+  };
 
   function reportError(err) {
     chrome.runtime.sendMessage({
@@ -138,7 +143,13 @@
   function scheduleLazy(candidates, generation) {
     disconnectLazy();
     if (!candidates.length || typeof IntersectionObserver === 'undefined') return;
+    // Each scan owns its queue and candidate bookkeeping. A blocked old image
+    // cannot hold up a replacement scan or delete its resolving markers.
+    const lazyPending = new WeakMap();
+    const lazyResolving = new WeakSet();
+    let queue = Promise.resolve();
     lazyObserver = new IntersectionObserver((entries) => {
+      if (generation !== scanGeneration) return;
       for (const entry of entries) {
         if (!entry.isIntersecting) continue;
         const el = entry.target;
@@ -147,8 +158,13 @@
         lazyObserver?.unobserve(el);
         lazyPending.delete(el);
         lazyResolving.add(el);
-        waitForPaint()
-          .then(() => analyzeCandidate(candidate, generation))
+        // Capture and merge one candidate at a time: the driver shares capture,
+        // visualIO and groupMap, so concurrent candidates would mix snapshots.
+        queue = queue.then(async () => {
+          if (generation !== scanGeneration) return;
+          await waitForPaint();
+          await analyzeCandidate(candidate, generation);
+        })
           .catch(err => { if (generation === scanGeneration) reportError(err); })
           .finally(() => lazyResolving.delete(el));
       }
@@ -169,35 +185,43 @@
   // Drive one offscreen session to completion, answering its asks.
   async function drive(startMsg, sid, onStage, generation) {
     if (generation !== scanGeneration) return null;
-    let r = await send({ ...startMsg, session: sid });
-    for (;;) {
-      if (generation !== scanGeneration) return null;
-      if (!r) throw new Error('the rule core did not answer');
-      if (r.error) throw new Error(r.error);
-      if (r.superseded) return null;
-      if (r.ask) {
-        if (lastStats) {
-          if (r.ask.hitTests) { lastStats.rounds += 1; lastStats.hitTests += r.ask.hitTests.length; }
-          else if (r.ask.io) lastStats.ioAsks += 1;
+    sid = `${sid}-${++sessionSequence}`;
+    activeSessions.add(sid);
+    try {
+      let r = await send({ ...startMsg, session: sid });
+      for (;;) {
+        if (generation !== scanGeneration) return null;
+        if (!r) throw new Error('the rule core did not answer');
+        if (r.error) throw new Error(r.error);
+        if (r.superseded) return null;
+        if (r.ask) {
+          if (lastStats) {
+            if (r.ask.hitTests) { lastStats.rounds += 1; lastStats.hitTests += r.ask.hitTests.length; }
+            else if (r.ask.io) lastStats.ioAsks += 1;
+          }
+          const a = await answer(r.ask);
+          if (generation !== scanGeneration) return null;
+          r = await send({ action: 'scan-continue', session: sid, answer: a });
+          continue;
         }
-        const a = await answer(r.ask);
-        if (generation !== scanGeneration) return null;
-        r = await send({ action: 'scan-continue', session: sid, answer: a });
-        continue;
+        if (r.stage) {
+          await onStage(r);
+          if (generation !== scanGeneration) return null;
+          r = await send({ action: 'scan-continue', session: sid, answer: {} });
+          continue;
+        }
+        return r;
       }
-      if (r.stage) {
-        await onStage(r);
-        if (generation !== scanGeneration) return null;
-        r = await send({ action: 'scan-continue', session: sid, answer: {} });
-        continue;
-      }
-      return r;
+    } finally {
+      activeSessions.delete(sid);
     }
   }
 
   async function runScan(config, id) {
     const generation = ++scanGeneration;
     scanId = id;
+    await cancelScans();
+    if (generation !== scanGeneration) return;
     window.__IMPECCABLE_CONFIG__ = config || {};
     await ensureUI();
     if (generation !== scanGeneration) return;
@@ -284,6 +308,8 @@
         reportError(err);
       });
       sendResponse({ ok: true });
+    } else if (msg.action === 'get-scan-id') {
+      sendResponse({ scanId });
     } else if (msg.action === 'toggle-overlays') {
       if (ui) {
         const visible = ui.toggleOverlays();
@@ -292,6 +318,8 @@
       sendResponse({ ok: true });
     } else if (msg.action === 'remove') {
       scanGeneration += 1;
+      scanId = null;
+      void cancelScans().catch(() => {});
       disconnectLazy();
       if (ui) ui.remove();
       groupMap.clear();
@@ -327,6 +355,8 @@
     if (injected) {
       // Invalidate this run now; the worker assigns the replacement scan ID.
       scanGeneration += 1;
+      scanId = null;
+      void cancelScans().catch(() => {});
       disconnectLazy();
       setTimeout(() => chrome.runtime.sendMessage({ action: 'scan' }).catch(() => {}), 500);
     }

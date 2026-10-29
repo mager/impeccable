@@ -10,7 +10,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 // Run the real worker with browser API boundaries replaced. Firefox exposes
 // getContexts, but rejects OFFSCREEN_DOCUMENT before the scan can start.
-function scannerHarness({ firefox = false, existingHost = false, failFirstCreate = false, failScanDelivery = false, deliverScan, inject, ping } = {}) {
+function scannerHarness({ firefox = false, existingHost = false, failFirstCreate = false, failScanDelivery = false, deliverScan, recoverScan, cancelTab, inject, ping } = {}) {
   const runtimeMessages = [];
   const tabMessages = [];
   const frames = [];
@@ -30,6 +30,7 @@ function scannerHarness({ firefox = false, existingHost = false, failFirstCreate
       async sendMessage(message) {
         runtimeMessages.push(message);
         if (message.action === 'ping') return ping ? ping() : { ok: ready };
+        if (message.action === 'scan-cancel-tab' && cancelTab) return cancelTab();
       },
     },
     action: { async setBadgeText() {}, async setBadgeBackgroundColor() {} },
@@ -37,11 +38,12 @@ function scannerHarness({ firefox = false, existingHost = false, failFirstCreate
     scripting: { async executeScript() { if (inject) await inject(); } },
     storage: { sync: { async get(defaults) { return defaults; } } },
     tabs: {
-      onRemoved: event(),
+      onRemoved: event('removed'),
       async sendMessage(tabId, message) {
         tabMessages.push({ tabId, ...message });
         if (failScanDelivery && message.action === 'scan') throw new Error('Receiving end does not exist');
         if (deliverScan && message.action === 'scan') return deliverScan(message);
+        if (message.action === 'get-scan-id') return { scanId: recoverScan ? await recoverScan() : null };
       },
     },
   };
@@ -423,6 +425,88 @@ describe('replacement scan isolation', () => {
     assert.equal(state(h).scanId, id);
   });
 
+  it('recovers a surviving page scan after a worker restart', async () => {
+    const h = scannerHarness({ recoverScan: () => 'surviving' });
+    deliver(h, 'surviving');
+    await nextTurn();
+    assert.equal(state(h).scanComplete, true);
+    assert.equal(state(h).findings[0].selector, 'surviving');
+    assert.equal(state(h).scanId, 'surviving');
+  });
+
+  it('does not recover an old document or override a newly started scan', async () => {
+    const oldPage = scannerHarness({ recoverScan: () => 'current-document' });
+    deliver(oldPage, 'old-document');
+    await nextTurn();
+    assert.equal(state(oldPage).scanComplete, false);
+    let release;
+    const h = scannerHarness({ recoverScan: () => new Promise(resolve => { release = resolve; }) });
+    deliver(h, 'old');
+    await nextTurn();
+    await vm.runInContext('sendScanToTab(7)', h.context);
+    const id = h.tabMessages.at(-1).scanId;
+    release('old');
+    await nextTurn();
+    assert.equal(state(h).scanId, id);
+    assert.equal(state(h).scanComplete, false);
+    deliver(h, id);
+    assert.equal(state(h).scanComplete, true);
+  });
+
+  it('coalesces worker recovery so partial and final reports keep their order', async () => {
+    let release;
+    let queries = 0;
+    const h = scannerHarness({ recoverScan: () => { queries++; return new Promise(resolve => { release = resolve; }); } });
+    h.listeners.message({ action: 'findings', scanId: 'surviving', scanComplete: false, findings: [] }, { tab: { id: 7 } }, () => {});
+    deliver(h, 'surviving');
+    await nextTurn();
+    assert.equal(queries, 1);
+    release('surviving');
+    await nextTurn();
+    assert.equal(state(h).scanComplete, true);
+    assert.equal(state(h).findings[0].selector, 'surviving');
+  });
+
+  it('recovers current errors but never recovers across navigation', async () => {
+    const failed = scannerHarness({ recoverScan: () => 'surviving' });
+    deliver(failed, 'surviving', 'detector-error');
+    await nextTurn();
+    assert.equal(state(failed).scanError, 'Old scan failed');
+    let release;
+    const h = scannerHarness({ recoverScan: () => new Promise(resolve => { release = resolve; }) });
+    deliver(h, 'old');
+    await nextTurn();
+    h.listeners.navigation({ tabId: 7, frameId: 0 });
+    release('old');
+    await nextTurn();
+    assert.equal(state(h).scanId, null);
+    assert.equal(state(h).findings.length, 0);
+  });
+
+  it('cancels destroyed tab sessions even before this worker has state', () => {
+    const h = scannerHarness();
+    h.listeners.navigation({ tabId: 7, frameId: 0 });
+    h.listeners.removed(8);
+    assert.deepEqual(h.runtimeMessages.filter(m => m.action === 'scan-cancel-tab').map(m => m.tabId), [7, 8]);
+  });
+
+  it('does not let an old teardown remove a new scan', async () => {
+    let release;
+    let calls = 0;
+    const h = scannerHarness({ cancelTab: () => ++calls === 2 ? new Promise(resolve => { release = resolve; }) : undefined });
+    await vm.runInContext('sendScanToTab(7)', h.context);
+    const teardown = vm.runInContext('tearDownTab(7)', h.context);
+    await nextTurn();
+    await vm.runInContext('sendScanToTab(7)', h.context);
+    const id = h.tabMessages.at(-1).scanId;
+    deliver(h, id);
+    release();
+    await teardown;
+    assert.equal(h.tabMessages.some(m => m.action === 'remove'), false);
+    assert.equal(state(h).scanId, id);
+    assert.equal(state(h).scanComplete, true);
+  });
+
   it('does not accept reports after navigation invalidates their scan', async () => {
     const h = scannerHarness();
     await vm.runInContext('sendScanToTab(7)', h.context);
@@ -480,6 +564,8 @@ for (const options of [{}, { rejectImage: true }, { replacementWaits: true }]) {
     await nextTurn();
     h.scan('new');
     await nextTurn();
+    const starts = h.messages.filter(m => m.action === 'scan-start');
+    assert.notEqual(starts[0].session, starts[1].session);
     const count = h.messages.filter(m => m.action === 'scan-continue').length;
     h.finishImage();
     await nextTurn();
@@ -490,3 +576,160 @@ for (const options of [{}, { rejectImage: true }, { replacementWaits: true }]) {
     if (complete.length) assert.equal(complete[0].scanId, 'new');
   });
 }
+
+
+for (const byTab of [false, true]) it(`canceling a parked lazy session releases the real offscreen queue (byTab=${byTab})`, async () => {
+  let listener;
+  const wasm = {
+    snapshot_load: () => 1, snapshot_has_needs: () => false,
+    collect_browser_findings: () => JSON.stringify({ groups: [], pageLevel: [] }),
+    snapshot_unknown_style_props: () => '[]', serialize_findings: () => '[]', snapshot_clear() {},
+    visual_contrast_result_el: () => 0,
+  };
+  const context = vm.createContext({
+    performance,
+    __impeccableLoadCore: async () => wasm,
+    __visualContrastMode: () => false,
+    createVisualContrast: io => ({ analyzeVisualContrastCandidate: async () => io.loadImage('/slow.png') }),
+    chrome: { runtime: { onMessage: { addListener(fn) { listener = fn; } } } },
+  });
+  vm.runInContext(readFileSync(path.join(ROOT, 'browser-bundle/60-offscreen.js'), 'utf8'), context);
+  const send = msg => new Promise(resolve => {
+    const pending = listener({ target: 'impeccable-offscreen', ...msg }, { tab: { id: msg.session === 'tab-two' ? 2 : 1 } }, resolve);
+    if (!pending) resolve(undefined);
+  });
+  const lazy = await send({ action: 'analyze-candidate', session: 'tab-one-lazy', snapshot: '{}' });
+  assert.equal(lazy.ask.io.kind, 'loadImage');
+  const queued = byTab ? send({ action: 'analyze-candidate', session: 'tab-one-queued', snapshot: '{}' }) : null;
+  let next;
+  const other = send({ action: 'scan-start', session: 'tab-two', snapshot: '{}' }).then(value => { next = value; });
+  await nextTurn();
+  assert.equal(next, undefined);
+  const cancelled = await send(byTab ? { action: 'scan-cancel-tab', tabId: 1 } : { action: 'scan-cancel', session: 'tab-one-lazy' });
+  assert.equal(cancelled?.ok, true);
+  if (queued) assert.equal((await queued).superseded, true);
+  const late = await send({ action: 'scan-continue', session: 'tab-one-lazy', answer: {} });
+  assert.equal(late.error, 'no such session');
+  await nextTurn();
+  assert.equal(next?.stage, 'findings');
+  await other;
+  const done = await send({ action: 'scan-continue', session: 'tab-two', answer: {} });
+  assert.equal(done.done, true);
+});
+
+function lazyCandidatesHarness() {
+  const messages = [];
+  const elements = [{ name: 'a' }, { name: 'b' }];
+  const sessions = new Map();
+  const observers = [];
+  const events = {};
+  const location = { href: 'https://example.test/' };
+  let listener;
+  let generation = 0;
+  let captureNumber = 0;
+  let releaseImage;
+  const blocked = new Promise(resolve => { releaseImage = resolve; });
+  const overlay = { remove() {}, clearOverlays() {}, highlight() {}, setFirstScanDone() {}, showPageBanner() {} };
+  const context = vm.createContext({
+    performance, location,
+    requestAnimationFrame: fn => setImmediate(fn),
+    setTimeout() {},
+    IntersectionObserver: class {
+      constructor(callback) { this.callback = callback; observers.push(this); }
+      observe() {} unobserve() {} disconnect() {}
+    },
+    document: { body: {}, documentElement: {}, addEventListener() {}, querySelector: selector => elements[selector === '#a' ? 0 : 1] },
+    window: {
+      addEventListener: (name, fn) => { events[name] = fn; },
+      __impeccableCreateOverlay: () => overlay,
+      __impeccableSnapshot: {
+        capture() {
+          const sequence = ++captureNumber;
+          return { json: JSON.stringify({ sequence }), sequence, elements: { 1: elements[0], 2: elements[1] }, stats: { elements: 2, bytes: 2, ms: 0 } };
+        },
+        idOf: el => elements.indexOf(el) + 1,
+        answer: (_ask, cap) => ({ sequence: cap.sequence }),
+        visualIO: cap => ({ loadImage: () => generation === 1 ? blocked : Promise.resolve({ sequence: cap.sequence }) }),
+      },
+    },
+    chrome: { runtime: {
+      onMessage: { addListener(fn) { listener = fn; } },
+      async sendMessage(msg) {
+        messages.push(msg);
+        if (msg.action === 'antipatterns') return { antipatterns: [] };
+        if (msg.action === 'scan-start') {
+          generation++;
+          sessions.set(msg.session, { stage: 0 });
+          return { stage: 'findings', groups: [], serialized: [] };
+        }
+        if (msg.action === 'analyze-candidate') {
+          sessions.set(msg.session, { candidate: msg, stage: 0 });
+          return { ask: { hitTests: [[0, 0]] } };
+        }
+        if (msg.action === 'scan-continue') {
+          const session = sessions.get(msg.session);
+          if (!session.candidate) {
+            if (++session.stage === 1) return { stage: 'visual', groups: [], added: [], serialized: [], lazy: [{ selector: '#a' }, { selector: '#b' }] };
+            return { done: true };
+          }
+          if (++session.stage === 1) {
+            assert.equal(msg.answer.sequence, JSON.parse(session.candidate.snapshot).sequence, 'candidate answers must use its own capture');
+            return { ask: { io: { kind: 'loadImage', src: '/candidate.png' } } };
+          }
+          const el = session.candidate.candidate.selector === '#a' ? 1 : 2;
+          const groups = [...session.candidate.groups, { el, findings: [{ type: 'low-contrast' }] }];
+          return { el, groups, serialized: groups.map(group => ({ selector: group.el === 1 ? '#a' : '#b', findings: group.findings })) };
+        }
+        return { ok: true };
+      },
+    } },
+  });
+  vm.runInContext(readFileSync(path.join(ROOT, 'extension/content/content-script.js'), 'utf8'), context);
+  return {
+    messages, releaseImage,
+    scan: id => listener({ action: 'scan', scanId: id }, {}, () => {}),
+    remove: () => listener({ action: 'remove' }, {}, () => {}),
+    navigate() { location.href += '#next'; events.hashchange(); },
+    visible: () => observers.at(-1).callback(elements.map(target => ({ target, isIntersecting: true }))),
+  };
+}
+const settleLazy = async () => { for (let i = 0; i < 8; i++) await nextTurn(); };
+
+it('serializes visible lazy candidates and preserves both findings', async () => {
+  const h = lazyCandidatesHarness();
+  h.scan('first');
+  await settleLazy();
+  h.visible();
+  await settleLazy();
+  assert.equal(h.messages.filter(m => m.action === 'analyze-candidate').length, 1, 'the second candidate must wait for the first IO');
+  h.releaseImage({});
+  await settleLazy();
+  assert.deepEqual(h.messages.filter(m => m.action === 'findings').at(-1).findings.map(f => f.selector), ['#a', '#b']);
+  assert.equal(h.messages.some(m => m.action === 'detector-error'), false);
+});
+
+for (const invalidation of ['restart', 'remove', 'navigate']) it(`a blocked old lazy queue cannot block the next scan after ${invalidation}`, async () => {
+  const h = lazyCandidatesHarness();
+  h.scan('first');
+  await settleLazy();
+  h.visible();
+  await settleLazy();
+  if (invalidation !== 'restart') h[invalidation]();
+  h.scan('second');
+  await settleLazy();
+  h.visible();
+  await settleLazy();
+  const reports = h.messages.filter(m => m.action === 'findings' && m.scanId === 'second');
+  assert.deepEqual(reports.at(-1).findings.map(f => f.selector), ['#a', '#b']);
+  const before = h.messages.length;
+  h.releaseImage({});
+  await settleLazy();
+  assert.equal(h.messages.length, before, 'a stale queued candidate must not start after old IO resolves');
+});
+
+it('tears down surviving content after worker state was lost', async () => {
+  const h = scannerHarness();
+  await vm.runInContext('tearDownTab(7)', h.context);
+  assert.equal(h.tabMessages.some(message => message.action === 'remove'), true);
+  assert.equal(vm.runInContext('getState(7).scanId', h.context), null);
+});
