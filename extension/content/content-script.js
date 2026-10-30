@@ -265,6 +265,9 @@
 
   async function analyzeCandidate(candidate, generation) {
     if (generation !== scanGeneration) return;
+    const ready = await chrome.runtime.sendMessage({ action: 'prepare-rule-core', scanId });
+    if (generation !== scanGeneration || ready?.superseded) return;
+    if (!ready?.ok) throw new Error(ready?.error || 'the rule core did not answer');
     const cap = snapshot.capture();
     if (cap.error) throw new Error(cap.error);
     const priorCapture = capture;

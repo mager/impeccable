@@ -702,6 +702,8 @@ it('serializes visible lazy candidates and preserves both findings', async () =>
   h.visible();
   await settleLazy();
   assert.equal(h.messages.filter(m => m.action === 'analyze-candidate').length, 1, 'the second candidate must wait for the first IO');
+  const prepare = h.messages.findIndex(m => m.action === 'prepare-rule-core');
+  assert(prepare >= 0 && prepare < h.messages.findIndex(m => m.action === 'analyze-candidate'), 'restore the host before a deferred request');
   h.releaseImage({});
   await settleLazy();
   assert.deepEqual(h.messages.filter(m => m.action === 'findings').at(-1).findings.map(f => f.selector), ['#a', '#b']);
@@ -732,4 +734,42 @@ it('tears down surviving content after worker state was lost', async () => {
   await vm.runInContext('tearDownTab(7)', h.context);
   assert.equal(h.tabMessages.some(message => message.action === 'remove'), true);
   assert.equal(vm.runInContext('getState(7).scanId', h.context), null);
+});
+
+
+describe('deferred rule-core preparation after background restart', () => {
+  for (const firefox of [false, true]) it(`restores the current deferred scan host (Firefox=${firefox})`, async () => {
+    const h = scannerHarness({ firefox, existingHost: !firefox, recoverScan: () => 'surviving' });
+    const result = await vm.runInContext("prepareRuleCore(7, 'surviving')", h.context);
+    assert.equal(result.ok, true);
+    assert.equal(h.creates(), firefox ? 1 : 0);
+    assert.equal(h.tabMessages.filter(m => m.action === 'scan').length, 0, 'do not replace the surviving scan');
+  });
+
+  it('reports deferred host failure through the message handler and retries', async () => {
+    const h = scannerHarness({ firefox: true, failFirstCreate: true, recoverScan: () => 'surviving' });
+    const prepare = () => new Promise(resolve => h.listeners.message(
+      { action: 'prepare-rule-core', scanId: 'surviving' }, { tab: { id: 7 } }, resolve,
+    ));
+    assert.match((await prepare()).error, /host creation failed/);
+    assert.equal((await prepare()).ok, true);
+    assert.equal(h.creates(), 2);
+  });
+
+  it('does not start a host for a stale document', async () => {
+    const h = scannerHarness({ firefox: true, recoverScan: () => 'current' });
+    const result = await vm.runInContext("prepareRuleCore(7, 'old')", h.context);
+    assert.equal(result.superseded, true);
+    assert.equal(h.creates(), 0);
+  });
+
+  it('invalidates deferred preparation when navigation happens during host startup', async () => {
+    let release;
+    const h = scannerHarness({ firefox: true, recoverScan: () => 'surviving', ping: () => new Promise(resolve => { release = resolve; }) });
+    const ready = vm.runInContext("prepareRuleCore(7, 'surviving')", h.context);
+    await nextTurn();
+    h.listeners.navigation({ tabId: 7, frameId: 0 });
+    release({ ok: true });
+    assert.equal((await ready).superseded, true);
+  });
 });

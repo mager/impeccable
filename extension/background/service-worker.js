@@ -47,7 +47,18 @@ async function acceptScanMessage(tabId, scanId, apply) {
     }
     await recovery;
   }
-  if (tabState.get(tabId) === state && state.scanId === scanId) apply(state);
+  if (tabState.get(tabId) === state && state.scanId === scanId) return apply(state);
+}
+
+// Firefox unloads the core iframe with its event page. Deferred work can
+// outlive that page, so restore its host before sending a new core request.
+async function prepareRuleCore(tabId, scanId) {
+  const result = await acceptScanMessage(tabId, scanId, async (state) => {
+    await ensureOffscreenDocument();
+    return tabState.get(tabId) === state && state.scanId === scanId
+      ? { ok: true } : { superseded: true };
+  });
+  return result || { superseded: true };
 }
 
 function cancelTabScans(tabId) {
@@ -254,6 +265,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // Broadcast for popup
       chrome.runtime.sendMessage({ action: 'findings-updated', tabId, findings: state.findings, url: state.url, scanComplete: state.scanComplete }).catch(() => {});
     }).then(() => sendResponse({ ok: true }));
+  }
+
+  else if (msg.action === 'prepare-rule-core' && tabId) {
+    prepareRuleCore(tabId, msg.scanId).then(sendResponse, err => {
+      sendResponse({ error: err?.message || String(err) });
+    });
   }
 
   else if (msg.action === 'scan' && tabId) {

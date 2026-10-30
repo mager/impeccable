@@ -93,3 +93,14 @@ navigation at the background worker boundary.
 The protocol tests cover active and queued cancellation, current-document ID
 recovery, concurrent partial/final reports, and teardown during a new scan.
 These controlled tests do not replace the manual worker-stop check above.
+
+
+Use `deferred.html` for this check at a normal desktop window height.
+The initial scan must complete with zero findings while the image-backed
+paragraph is below the viewport.
+
+For Firefox background recovery, scan that page at the top. Keep that page open. In `about:debugging#/runtime/this-firefox`, select
+**Terminate background script** and confirm **Stopped**. Return to the page and
+scroll the text into view without selecting Scan again. Its contrast finding
+must appear and copy correctly. This also tests restoration of Firefox's
+rule-core iframe, which is destroyed when the background page stops.
