@@ -128,7 +128,7 @@ fn legacy_sidecar_uses_timestamp_fallback_at_boot() {
     }
 }
 #[test]
-fn malformed_or_unknown_fingerprint_is_unverified() {
+fn malformed_or_unknown_fingerprint_uses_boot_fallback_and_doctor_notice() {
     for invalid in [
         Value::Null,
         json!(17),
@@ -138,8 +138,19 @@ fn malformed_or_unknown_fingerprint_is_unverified() {
         json!({"algorithm":"sha256","normalization":"future-v2","digest":"0".repeat(64)}),
     ] {
         let fixture = Fixture::new(Some(invalid));
-        fixture.source(ORIGINAL, 100);
-        assert!(!has(&fixture.findings(), "design-sidecar-unverified"));
+        for seconds in [100, 300] {
+            fixture.source(ORIGINAL, seconds);
+            let findings = fixture.findings();
+            assert!(!has(&findings, "design-sidecar-unverified"));
+            assert_eq!(has(&findings, "design-sidecar-stale"), seconds > 200);
+            let doctor = impeccable_context::staleness::check_design_sidecar_for_doctor(
+                fixture.root.join("DESIGN.md").to_str(),
+                &[fixture.root.join(".impeccable/design.json").to_string_lossy().into_owned()],
+                fixture.root.to_str().unwrap(),
+            );
+            assert!(has(&doctor, "design-sidecar-unverified"));
+            assert!(!has(&doctor, "design-sidecar-stale"));
+        }
     }
 }
 #[test]

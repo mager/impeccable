@@ -1133,10 +1133,11 @@ pub fn load_design_system_for_cwd(cwd: &str) -> Option<DesignSystem> {
     let frontmatter = parse_frontmatter(&text)?;
     let sidecar_path = resolve_design_sidecar_path(cwd, &md.context_dir);
     let sidecar = sidecar_path.as_deref().and_then(read_json);
+    let source_bytes = std::fs::read(&md.path).ok()?;
     // Fingerprints take precedence; legacy sidecars retain the timestamp check.
     let md_newer = impeccable_common::design_fingerprint::matches_source(
         sidecar.as_ref().and_then(|s| s.get("designMdFingerprint")),
-        text.as_bytes(),
+        &source_bytes,
     ).map(|current| !current).unwrap_or_else(|| {
         let modified = |path: &str| std::fs::metadata(path).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64() * 1000.0);
         matches!((modified(&md.path), sidecar_path.as_deref().and_then(modified)), (Some(m), Some(s)) if m > s + 1000.0)

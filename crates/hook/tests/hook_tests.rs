@@ -4209,3 +4209,15 @@ fn the_before_edit_gate_lets_a_plain_script_through_outside_impeccable_projects(
     t.write("DESIGN.md", "# Design\n");
     assert!(hbe(&r, &write).0.starts_with("{\"permission\":\"deny\""), "with Impeccable context the gate scans it");
 }
+
+#[test]
+fn design_sidecar_fingerprint_compares_raw_source_bytes() {
+    let t = Tmp::new();
+    let cwd = t.path();
+    t.write("package.json", "{}");
+    let source = b"---\nname: Test\n---\n\xff\n";
+    std::fs::write(std::path::Path::new(&cwd).join("DESIGN.md"), source).unwrap();
+    t.write(".impeccable/design.json", &json!({"schemaVersion": 2,
+        "designMdFingerprint": impeccable_common::design_fingerprint::fingerprint(source)}).to_string());
+    assert!(!design_system_options(&read_config(&cwd), &cwd).md_newer_than_json());
+}

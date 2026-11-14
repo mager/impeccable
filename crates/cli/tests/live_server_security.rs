@@ -120,7 +120,7 @@ fn live_server_source_ignores_and_poller_fields() {
         assert_eq!(read_design()["sidecarStatus"], "stale");
         assert_eq!(read_design()["mdNewerThanJson"], true);
         impeccable_context::design_sidecar::stamp(&design, &sidecar).unwrap();
-        let set_time = |seconds| std::fs::File::open(&design).unwrap().set_times(
+        let set_time = |seconds| std::fs::File::options().write(true).open(&design).unwrap().set_times(
             std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))
         ).unwrap();
         set_time(2_000_000_000);
