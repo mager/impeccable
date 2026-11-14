@@ -1,6 +1,6 @@
 //! Content provenance for DESIGN.md sidecars. Checking never writes a stamp.
 use crate::artifact_schema::DESIGN_SIDECAR_SCHEMA_VERSION;
-use crate::context::resolve_context;
+use crate::context::{resolve_context, resolve_target_path};
 use crate::jsp;
 use crate::target_args::parse_target_options;
 use impeccable_common::{fsx::write_atomic, Io};
@@ -60,14 +60,25 @@ pub fn run(args: &[String], io: &mut Io) -> i32 {
             }
         }
     }
-    let options = match parse_target_options(rest, true) {
+    let mut options = match parse_target_options(rest, true) {
         Ok(o) => o,
         Err(e) => {
             io.err(&format!("{e}\n"));
             return 1;
         }
     };
-    let ctx = resolve_context(&io.cwd.to_string_lossy(), &options, &io.env);
+    let cwd = io.cwd.to_string_lossy();
+    if let Some(target) = options.target_path.as_deref() {
+        let resolved = resolve_target_path(&cwd, target, &io.env);
+        // A write command must not fall back to the caller's project when an
+        // explicit target is missing or cannot name one workspace uniquely.
+        if !Path::new(&resolved).exists() {
+            io.err(&format!("Target does not exist or is not a unique workspace: {target}\n"));
+            return 1;
+        }
+        options.target_path = Some(resolved);
+    }
+    let ctx = resolve_context(&cwd, &options, &io.env);
     let Some(design) = ctx.design_path else {
         io.err("No DESIGN.md found. Run document first.\n");
         return 1;

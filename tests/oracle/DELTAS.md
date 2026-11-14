@@ -7425,3 +7425,13 @@ New cases, recorded from the binary and reviewed by hand. `SEEDED_WORLD` used to
 ## Recorded 2026-11-14: two cases from main take the `detect --changed` detector line
 
 `context-taste-ready` and `context-seeded-world-starter-css-with-product` arrived from main after this branch changed the `MANUAL_DETECTOR_REQUIRED` line to name `detect --json --changed`. Both were re-recorded from the branch binary and reviewed by hand: only that one stdout line changes in each; exit, stderr and files are unchanged.
+
+## Recorded 2026-11-14: sidecar stamp target resolution (#1195 review)
+
+Two new CLI cases, recorded from the source-built binary and reviewed as
+decoded JSON: `design-sidecar-target-short-workspace` resolves `--target web`
+to `apps/web`, stamps only the child sidecar, and leaves the root sidecar and
+both source files unchanged (exit 0). `design-sidecar-target-unknown` refuses
+a missing explicit target without changing either root design file (exit 1).
+No existing golden or frozen call vector changed. These cases add coverage;
+they do not exempt existing cases from replay.

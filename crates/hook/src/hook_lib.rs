@@ -1750,7 +1750,7 @@ pub fn detector_detect_html(
 
 pub fn design_stale_note(rt: &Runtime) -> String {
     format!(
-        "{ENVELOPE_PREFIX} DESIGN.md has changed since the sidecar was verified. Run {} document to refresh the design-system sidecar.",
+        "{ENVELOPE_PREFIX} The design-system sidecar may be out of date with DESIGN.md. Run {} document to refresh the design-system sidecar.",
         rt.impeccable_command
     )
 }

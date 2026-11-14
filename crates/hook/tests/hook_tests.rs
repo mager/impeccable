@@ -616,7 +616,7 @@ fn monorepo_design_batch_notes_follow_the_displayed_file() {
                 hook::run_hook(&r, &event.to_string()).stdout
             };
             assert!(out.contains("apps/a/src/probe.css"), "{mode}: {out}");
-            assert_eq!(out.contains("DESIGN.md has changed"), stale_app == "a", "{mode}: {out}");
+            assert_eq!(out.contains("sidecar may be out of date"), stale_app == "a", "{mode}: {out}");
         }
     }
 }
@@ -823,7 +823,7 @@ fn stop_baseline_unknown_notice_respects_small_output_budget() {
         assert!(text.contains("[attribution unknown]"), "{text}");
         assert!(text.contains("card.css"), "{text}");
         if stale {
-            assert_eq!(text.contains("DESIGN.md has changed"), budget > 500, "{text}");
+            assert_eq!(text.contains("sidecar may be out of date"), budget > 500, "{text}");
             let cache: Value = serde_json::from_str(&t.read(".impeccable/hook.cache.json")).unwrap();
             assert_eq!(cache["sessions"]["s1"]["designNoteShown"] == json!(true), budget > 500);
         }
@@ -4220,4 +4220,20 @@ fn design_sidecar_fingerprint_compares_raw_source_bytes() {
     t.write(".impeccable/design.json", &json!({"schemaVersion": 2,
         "designMdFingerprint": impeccable_common::design_fingerprint::fingerprint(source)}).to_string());
     assert!(!design_system_options(&read_config(&cwd), &cwd).md_newer_than_json());
+}
+
+#[test]
+fn legacy_sidecar_note_does_not_claim_content_verification() {
+    let t = Tmp::new();
+    let cwd = t.path();
+    t.write("package.json", "{}");
+    let design = t.write("DESIGN.md", "---\nname: Test\n---\n");
+    t.write(".impeccable/design.json", "{}");
+    std::fs::File::options().write(true).open(design).unwrap()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000_000)).unwrap();
+    let scan = design_system_options(&read_config(&cwd), &cwd);
+    let note = append_design_system_note(&rt(&cwd), "A finding", &scan);
+    assert!(note.contains("may be out of date"), "{note}");
+    assert!(!note.contains("verified"), "{note}");
+    assert!(note.contains("document"), "{note}");
 }

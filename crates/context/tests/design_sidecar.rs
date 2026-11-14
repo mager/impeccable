@@ -263,6 +263,15 @@ fn command_resolves_target_and_refuses_invalid_arguments_without_writes() {
 
 #[test]
 fn command_stamps_only_the_selected_workspace() {
+    assert_stamps_selected_workspace("apps/web");
+}
+
+#[test]
+fn command_resolves_short_workspace_name_before_stamping() {
+    assert_stamps_selected_workspace("web");
+}
+
+fn assert_stamps_selected_workspace(target: &str) {
     let fixture = Fixture::new(None);
     fs::create_dir_all(fixture.root.join(".git")).unwrap();
     fs::write(
@@ -281,7 +290,7 @@ fn command_stamps_only_the_selected_workspace() {
     .unwrap();
     let root_before = fs::read(fixture.root.join(".impeccable/design.json")).unwrap();
     assert_eq!(
-        command(&fixture.root, &["stamp", "--target", "apps/web"]),
+        command(&fixture.root, &["stamp", "--target", target]),
         0
     );
     let child: Value =
@@ -306,4 +315,30 @@ fn doctor_reports_unverified_in_both_legacy_timestamp_orders() {
         assert!(has(&findings, "design-sidecar-unverified"));
         assert!(!has(&findings, "design-sidecar-stale"));
     }
+}
+
+#[test]
+fn command_refuses_missing_target_without_stamping_root() {
+    let fixture = Fixture::new(None);
+    fs::write(fixture.root.join("package.json"), "{}").unwrap();
+    let sidecar = fixture.root.join(".impeccable/design.json");
+    let before = fs::read(&sidecar).unwrap();
+    assert_eq!(command(&fixture.root, &["stamp", "--target", "missing"]), 1);
+    assert_eq!(fs::read(sidecar).unwrap(), before);
+}
+
+#[test]
+fn command_refuses_ambiguous_workspace_without_stamping_root() {
+    let fixture = Fixture::new(None);
+    fs::create_dir_all(fixture.root.join(".git")).unwrap();
+    fs::write(fixture.root.join("package.json"), r#"{"workspaces":["apps/*","packages/*"]}"#).unwrap();
+    for parent in ["apps", "packages"] {
+        let child = fixture.root.join(parent).join("web");
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("package.json"), "{}").unwrap();
+    }
+    let sidecar = fixture.root.join(".impeccable/design.json");
+    let before = fs::read(&sidecar).unwrap();
+    assert_eq!(command(&fixture.root, &["stamp", "--target", "web"]), 1);
+    assert_eq!(fs::read(sidecar).unwrap(), before);
 }
