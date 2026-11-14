@@ -115,16 +115,16 @@ fn restored_source_matches_the_original_fingerprint() {
     assert!(!has(&fixture.findings(), "design-sidecar-stale"));
 }
 #[test]
-fn legacy_sidecar_is_unverified_for_either_timestamp_order() {
+fn legacy_sidecar_uses_timestamp_fallback_at_boot() {
     let fixture = Fixture::new(None);
     for seconds in [100, 300] {
         fixture.source(ORIGINAL, seconds);
         let findings = fixture.findings();
         assert!(
-            has(&findings, "design-sidecar-unverified"),
+            !has(&findings, "design-sidecar-unverified"),
             "mtime={seconds}"
         );
-        assert!(!has(&findings, "design-sidecar-stale"));
+        assert_eq!(has(&findings, "design-sidecar-stale"), seconds > 200);
     }
 }
 #[test]
@@ -139,7 +139,7 @@ fn malformed_or_unknown_fingerprint_is_unverified() {
     ] {
         let fixture = Fixture::new(Some(invalid));
         fixture.source(ORIGINAL, 100);
-        assert!(has(&fixture.findings(), "design-sidecar-unverified"));
+        assert!(!has(&fixture.findings(), "design-sidecar-unverified"));
     }
 }
 #[test]
@@ -280,4 +280,19 @@ fn command_stamps_only_the_selected_workspace() {
         fs::read(fixture.root.join(".impeccable/design.json")).unwrap(),
         root_before
     );
+}
+
+#[test]
+fn doctor_reports_unverified_in_both_legacy_timestamp_orders() {
+    let fixture = Fixture::new(None);
+    for seconds in [100, 300] {
+        fixture.source(ORIGINAL, seconds);
+        let findings = impeccable_context::staleness::check_design_sidecar_for_doctor(
+            fixture.root.join("DESIGN.md").to_str(),
+            &[fixture.root.join(".impeccable/design.json").to_string_lossy().into_owned()],
+            fixture.root.to_str().unwrap(),
+        );
+        assert!(has(&findings, "design-sidecar-unverified"));
+        assert!(!has(&findings, "design-sidecar-stale"));
+    }
 }

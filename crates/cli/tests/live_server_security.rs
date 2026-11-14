@@ -112,8 +112,13 @@ fn live_server_source_ignores_and_poller_fields() {
             assert_eq!(status, 200);
             serde_json::from_str::<serde_json::Value>(&body).unwrap()
         };
-        assert_eq!(read_design()["sidecarStatus"], "unverified");
+        assert_eq!(read_design()["sidecarStatus"], "current");
         assert_eq!(read_design()["mdNewerThanJson"], false);
+        std::fs::File::options().write(true).open(&design).unwrap().set_modified(
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(2_000_000_000)
+        ).unwrap();
+        assert_eq!(read_design()["sidecarStatus"], "stale");
+        assert_eq!(read_design()["mdNewerThanJson"], true);
         impeccable_context::design_sidecar::stamp(&design, &sidecar).unwrap();
         let set_time = |seconds| std::fs::File::open(&design).unwrap().set_times(
             std::fs::FileTimes::new().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds))

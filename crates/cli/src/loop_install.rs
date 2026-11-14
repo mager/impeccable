@@ -13,7 +13,7 @@ use url::Url;
 const PINS: &str = include_str!("../loop-checksums.txt");
 const BASE: &str = "https://github.com/pbakaus/impeccable/releases/download";
 const APP: &str = "Impeccable Loop.app";
-const USAGE: &str = "Usage: impeccable loop install [--version X.Y.Z] [--no-open]\n       impeccable loop update [--no-open]\n";
+const USAGE: &str = "Usage: impeccable loop install [--version X.Y.Z] [--no-open] [--connect|--no-connect] [--taste|--no-taste]\n       impeccable loop update [--no-open]\n       impeccable loop connect [--agent claude|codex] [--taste|--no-taste] [--json]\n       impeccable loop status [--json]\n       impeccable loop disconnect\n";
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -184,24 +184,66 @@ fn executable(app: &Path) -> Result<PathBuf> {
     fs::canonicalize(app.join("Contents/MacOS").join(name)).map_err(|e| e.to_string())
 }
 
-fn refuse_running(app: &Path) -> Result<()> {
+const RUNNING: &str =
+    "Impeccable Loop didn't quit. Quit it yourself, then run impeccable loop update again.";
+/// How long `loop update` waits for a running Loop to quit.
+const QUIT_WAIT: Duration = Duration::from_secs(10);
+
+/// The pids whose executable is exactly this bundle's, never another app's: matched by
+/// canonical path, not by name or bundle id (a development build shares the id).
+fn running_pids(app: &Path) -> Result<Vec<i32>> {
     let exe = executable(app)?;
     let out = Command::new("/bin/ps")
-        .args(["-axo", "comm="])
+        .args(["-axo", "pid=,comm="])
         .output()
         .map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err("Cannot check whether Loop is running; quit Loop and retry.".into());
     }
-    if String::from_utf8_lossy(&out.stdout)
+    Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
-        .any(|line| fs::canonicalize(line.trim()).is_ok_and(|path| path == exe))
-    {
-        return Err(
-            "Impeccable Loop is running. Quit Loop first, then run impeccable loop update.".into(),
-        );
+        .filter_map(|line| {
+            let (pid, comm) = line.trim_start().split_once(char::is_whitespace)?;
+            let path = fs::canonicalize(comm.trim()).ok()?;
+            (path == exe).then(|| pid.parse().ok()).flatten()
+        })
+        .collect())
+}
+
+/// Ask a running Loop to quit (SIGTERM to this bundle's processes only) and wait up to
+/// `wait` for them to exit. One that is still running keeps today's refusal.
+fn quit_running(app: &Path, wait: Duration) -> Result<()> {
+    #[cfg(unix)]
+    let signal = libc::SIGTERM;
+    #[cfg(not(unix))]
+    let signal = 0;
+    quit_running_with(app, wait, signal)
+}
+
+/// [`quit_running`] with the signal as a parameter, so a test can stand in for a Loop
+/// that ignores it (signal 0 delivers nothing).
+fn quit_running_with(app: &Path, wait: Duration, signal: i32) -> Result<()> {
+    let pids = running_pids(app)?;
+    if pids.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    for &pid in &pids {
+        #[cfg(unix)]
+        // SAFETY: a plain signal to a pid this bundle's executable owns.
+        unsafe {
+            libc::kill(pid, signal);
+        }
+    }
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        if running_pids(app)?.is_empty() {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(RUNNING.into());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn swap(staged: &Path, app: &Path, backup: &Path, update: bool) -> Result<()> {
@@ -231,9 +273,69 @@ fn swap(staged: &Path, app: &Path, backup: &Path, update: bool) -> Result<()> {
 }
 
 pub(crate) fn run(args: &[String], io: &mut Io) -> i32 {
-    match run_inner(args, io, PINS, std::env::consts::OS) {
+    use crate::loop_connect::Taste;
+    // `--taste` / `--no-taste` answer connect's taste question ahead of time.
+    let (taste_yes, taste_no) = (
+        args.iter().any(|a| a == "--taste"),
+        args.iter().any(|a| a == "--no-taste"),
+    );
+    let verb = args.first().map(String::as_str);
+    if (taste_yes || taste_no)
+        && ((taste_yes && taste_no) || !matches!(verb, Some("connect" | "install")))
+    {
+        io.err(&format!("--taste and --no-taste go with loop connect or loop install, one at a time.\n{USAGE}"));
+        return 1;
+    }
+    let taste = if taste_yes {
+        Taste::Yes
+    } else if taste_no {
+        Taste::No
+    } else {
+        Taste::Ask
+    };
+    let args: Vec<String> = args
+        .iter()
+        .filter(|a| *a != "--taste" && *a != "--no-taste")
+        .cloned()
+        .collect();
+    let args = args.as_slice();
+    // The JSON forms answer one object on stdout whatever happened, for Loop's own UI.
+    if args.iter().any(|a| a == "--json") {
+        if let Some(code) = run_json(args, io, std::env::consts::OS, taste) {
+            return code;
+        }
+    }
+    // `--connect` / `--no-connect` belong to this wrapper: install itself never changes.
+    let wants = |flag: &str| args.iter().any(|a| a == flag);
+    let (connect, no_connect) = (wants("--connect"), wants("--no-connect"));
+    let install = args.first().is_some_and(|a| a == "install");
+    if (connect || no_connect) && (!install || (connect && no_connect)) {
+        io.err(&format!("--connect and --no-connect go with loop install, one at a time.\n{USAGE}"));
+        return 1;
+    }
+    let inner: Vec<String> = args
+        .iter()
+        .filter(|a| *a != "--connect" && *a != "--no-connect")
+        .cloned()
+        .collect();
+    let connect_args = match inner.as_slice() {
+        [c] if c == "connect" => Some(None),
+        [c, a, h] if c == "connect" && a == "--agent" => Some(Some(h.as_str())),
+        _ => None,
+    };
+    if let Some(only) = connect_args {
+        let (result, connected) = match check_platform(std::env::consts::OS) {
+            Ok(()) => crate::loop_connect::connect_text(io, only),
+            Err(e) => (Err(e), Vec::new()),
+        };
+        return connect_then_taste(io, result, &connected, taste, "");
+    }
+    match run_inner(&inner, io, PINS, std::env::consts::OS) {
         Ok(message) => {
             io.out(&message);
+            if install && !no_connect {
+                return after_install(io, connect, taste);
+            }
             0
         }
         Err(e) => {
@@ -243,10 +345,144 @@ pub(crate) fn run(args: &[String], io: &mut Io) -> i32 {
     }
 }
 
+/// The step after a fresh install: connect the agents. `--connect` does it outright; a
+/// person at a terminal is asked once (Enter means yes); anything else (an agent, a
+/// script, a pipe) gets the one command to run next and nothing is changed.
+fn after_install(io: &mut Io, connect: bool, taste: crate::loop_connect::Taste) -> i32 {
+    use std::io::IsTerminal;
+    let ask = !connect && io.stdin_is_tty && std::io::stdout().is_terminal();
+    let yes = connect || (ask && {
+        io.out("Connect Claude Code and Codex to Loop now? [Y/n] ");
+        let _ = std::io::Write::flush(&mut io.stdout);
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)
+            .is_ok_and(|n| connect_answer(n, &line))
+    });
+    if !yes {
+        io.out("Next: impeccable loop connect, so your agents bring their questions to Loop.\n");
+        return 0;
+    }
+    let (result, connected) = crate::loop_connect::connect_text(io, None);
+    // Loop itself is installed; say how to finish rather than failing the install.
+    let finish = "Loop is installed. Run impeccable loop connect again once that is sorted.\n";
+    connect_then_taste(io, result, &connected, taste, finish)
+}
+
+/// Print a text connect's report, then make the taste offer to the agents it
+/// connected, which still happens when another agent failed. `on_error` follows the
+/// error. The exit code is the connect's.
+fn connect_then_taste(
+    io: &mut Io,
+    result: Result<String>,
+    connected: &[String],
+    taste: crate::loop_connect::Taste,
+    on_error: &str,
+) -> i32 {
+    let code = match result {
+        Ok(message) => {
+            io.out(&message);
+            0
+        }
+        Err(e) => {
+            io.err(&format!("{e}\n{on_error}"));
+            1
+        }
+    };
+    if !connected.is_empty() {
+        let (lines, _) = crate::loop_connect::offer_taste(io, connected, taste);
+        io.out(&lines);
+    }
+    code
+}
+
+fn connect_answer(bytes_read: usize, line: &str) -> bool {
+    bytes_read > 0
+        && matches!(line.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes")
+}
+
+/// `loop status --json` and `loop connect [--agent claude|codex] --json`. `None` when
+/// the arguments are not one of those, so usage errors read as usual.
+fn run_json(
+    args: &[String],
+    io: &mut Io,
+    os: &str,
+    taste: crate::loop_connect::Taste,
+) -> Option<i32> {
+    let rest: Vec<&str> = args[1..]
+        .iter()
+        .map(String::as_str)
+        .filter(|a| *a != "--json")
+        .collect();
+    let (value, ok) = match (args.first().map(String::as_str), rest.as_slice()) {
+        _ if check_platform(os).is_err() => (
+            serde_json::json!({ "ok": false, "error": "Impeccable Loop is only available on macOS." }),
+            false,
+        ),
+        (Some("status"), []) => match crate::loop_connect::status(io) {
+            Ok(v) => (v, true),
+            Err(e) => (serde_json::json!({ "ok": false, "error": e }), false),
+        },
+        (Some("connect"), []) => with_taste(io, None, taste),
+        (Some("connect"), ["--agent", agent]) => with_taste(io, Some(agent), taste),
+        _ => return None,
+    };
+    io.out(&format!("{value}\n"));
+    Some(if ok { 0 } else { 1 })
+}
+
+/// `connect --json`: never asks, so the taste block is added or removed only with
+/// `--taste` or `--no-taste`. `taste`, present only when a rule file was touched or
+/// asked about, lists what happened to each.
+fn with_taste(
+    io: &mut Io,
+    only: Option<&str>,
+    taste: crate::loop_connect::Taste,
+) -> (serde_json::Value, bool) {
+    use crate::loop_connect::Taste;
+    let taste = if taste == Taste::Ask { Taste::Skip } else { taste };
+    let (mut value, ok) = crate::loop_connect::connect_json(io, only);
+    // Only the agents this run connected.
+    let connected: Vec<String> = value["agents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|a| a["result"] == "connected")
+        .filter_map(|a| a["agent"].as_str().map(str::to_owned))
+        .collect();
+    let rows = if connected.is_empty() {
+        Vec::new()
+    } else {
+        crate::loop_connect::offer_taste(io, &connected, taste).1
+    };
+    if !rows.is_empty() {
+        value["taste"] = serde_json::Value::Array(rows);
+    }
+    (value, ok)
+}
+
 fn run_inner(args: &[String], io: &Io, manifest: &str, os: &str) -> Result<String> {
     // Arguments first, so usage and its errors read the same on every OS (the oracle records them).
     if args.first().is_some_and(|s| s == "--help" || s == "-h") {
         return Ok(USAGE.into());
+    }
+    match args.first().map(String::as_str) {
+        Some("connect") if args.len() == 1 => {
+            check_platform(os)?;
+            return crate::loop_connect::connect(io);
+        }
+        Some("status") if args.len() == 1 => {
+            check_platform(os)?;
+            return crate::loop_connect::status(io).map(|v| crate::loop_connect::status_text(&v));
+        }
+        Some("connect") if args.len() == 3 && args[1] == "--agent" => {
+            check_platform(os)?;
+            return crate::loop_connect::connect_only(io, Some(&args[2]));
+        }
+        Some("disconnect") if args.len() == 1 => {
+            check_platform(os)?;
+            return crate::loop_connect::disconnect(io);
+        }
+        _ => {}
     }
     let update = match args.first().map(String::as_str) {
         Some("install") => false,
@@ -336,7 +572,8 @@ fn run_inner(args: &[String], io: &Io, manifest: &str, os: &str) -> Result<Strin
                 "Loop {installed} is newer than the newest pinned release ({version}); nothing to update.\n"
             ));
         }
-        refuse_running(&app)?;
+        // A running Loop is asked to quit only once the new build is downloaded and
+        // verified, just before the swap, so a failed download leaves it running.
     }
     let base = io
         .env("IMPECCABLE_DOWNLOAD_BASE")
@@ -369,7 +606,7 @@ fn run_inner(args: &[String], io: &Io, manifest: &str, os: &str) -> Result<Strin
         return Err("Loop bundle version does not match its release.".into());
     }
     if update {
-        refuse_running(&app)?;
+        quit_running(&app, QUIT_WAIT)?;
     }
     swap(&staged, &app, &backup, update)?;
     if !no_open {

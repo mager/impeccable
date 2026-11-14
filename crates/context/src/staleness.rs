@@ -228,6 +228,14 @@ pub fn js_truthy(v: &Value) -> bool {
 
 /// JS: checkDesignSidecar
 pub fn check_design_sidecar(design_path: Option<&str>, sidecar_candidates: &[String], project_root: &str) -> Vec<Finding> {
+    check_design_sidecar_inner(design_path, sidecar_candidates, project_root, false)
+}
+
+pub fn check_design_sidecar_for_doctor(design_path: Option<&str>, sidecar_candidates: &[String], project_root: &str) -> Vec<Finding> {
+    check_design_sidecar_inner(design_path, sidecar_candidates, project_root, true)
+}
+
+fn check_design_sidecar_inner(design_path: Option<&str>, sidecar_candidates: &[String], project_root: &str, report_unverified: bool) -> Vec<Finding> {
     let mut out = Vec::new();
     let canonical = sidecar_candidates.first();
     let Some(present) = sidecar_candidates.iter().find(|c| exists(c)) else { return out };
@@ -278,11 +286,20 @@ pub fn check_design_sidecar(design_path: Option<&str>, sidecar_candidates: &[Str
                 format!("DESIGN.md content differs from the fingerprint recorded in {}, so the sidecar's ramps, shadows, motion tokens, and component snippets may contradict it.", rel_present),
                 "Offer `document` to refresh the sidecar, preserving DESIGN.md.".to_string(),
             )),
-            None => out.push(finding(
+            None if report_unverified => out.push(finding(
                 "design-sidecar-unverified", "design.json", Some(rel_present.clone()), "mention",
                 format!("{} has no verifiable DESIGN.md content fingerprint; file timestamps cannot establish whether it is current.", rel_present),
                 "Offer `document` to review or regenerate the sidecar against DESIGN.md, then stamp its fingerprint. Do not stamp an unchecked sidecar just to dismiss this notice.".to_string(),
             )),
+            None => {
+                if matches!((crate::util::mtime_ms(dp), crate::util::mtime_ms(present)), (Some(d), Some(s)) if d > s) {
+                    out.push(finding(
+                        "design-sidecar-stale", "design.json", Some(rel_present.clone()), "mention",
+                        format!("DESIGN.md was edited after {} was generated, so the sidecar's ramps, shadows, motion tokens, and component snippets may contradict it.", rel_present),
+                        "Offer `document` to refresh the sidecar, preserving DESIGN.md.".to_string(),
+                    ));
+                }
+            },
         }
     }
     out

@@ -27,7 +27,7 @@ use crate::util::{exists, js_string, re, read_json, read_text, ANY, WS};
 const DESIGN_NAMES: &[&str] = &["DESIGN.md", "Design.md", "design.md"];
 
 const FALLBACK_DIRS: &[&str] = &[".agents/context", "docs"];
-const PROJECT_ROOT_MARKERS: &[&str] = &[".git", "package.json", ".impeccable"];
+pub(crate) const PROJECT_ROOT_MARKERS: &[&str] = &[".git", "package.json", ".impeccable"];
 const COLOR_CHANNEL_TOLERANCE: f64 = 6.0;
 const SHADOW_ALPHA_TOLERANCE: f64 = 0.02;
 const RADIUS_TOLERANCE_PX: f64 = 0.5;
@@ -1133,12 +1133,14 @@ pub fn load_design_system_for_cwd(cwd: &str) -> Option<DesignSystem> {
     let frontmatter = parse_frontmatter(&text)?;
     let sidecar_path = resolve_design_sidecar_path(cwd, &md.context_dir);
     let sidecar = sidecar_path.as_deref().and_then(read_json);
-    // Keep the compatibility flag, but only a content mismatch proves staleness.
-    // Missing provenance is reported as unverified by context/doctor.
+    // Fingerprints take precedence; legacy sidecars retain the timestamp check.
     let md_newer = impeccable_common::design_fingerprint::matches_source(
         sidecar.as_ref().and_then(|s| s.get("designMdFingerprint")),
         text.as_bytes(),
-    ) == Some(false);
+    ).map(|current| !current).unwrap_or_else(|| {
+        let modified = |path: &str| std::fs::metadata(path).ok()?.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok().map(|d| d.as_secs_f64() * 1000.0);
+        matches!((modified(&md.path), sidecar_path.as_deref().and_then(modified)), (Some(m), Some(s)) if m > s + 1000.0)
+    });
     let mut ds = normalize_design_system(
         Some(&frontmatter),
         sidecar.as_ref(),
@@ -1437,7 +1439,7 @@ fn monorepo_owns_path(root: &str, boundary_dir: &str) -> bool {
 /// never string-matches the physical paths a cwd-resolved target produces,
 /// which would let the post-boundary walk sail through $HOME and inherit
 /// from it.
-fn home_dir_forms(cwd: &str, home: &str) -> Vec<String> {
+pub(crate) fn home_dir_forms(cwd: &str, home: &str) -> Vec<String> {
     let home_dir = jsp::resolve(cwd, &[home]);
     let mut forms = vec![home_dir.clone()];
     if let Ok(real) = std::fs::canonicalize(&home_dir) {

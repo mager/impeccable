@@ -68,7 +68,9 @@ Omit irrelevant sections rather than filling them with invented rules. Put respo
 - An existing `DESIGN.md` is stale (the design has drifted).
 - Before a large redesign, to capture the current state as a reference.
 
-If a `DESIGN.md` already exists, **do not silently overwrite it**. Show the user the existing file first. {{ask_instruction}} The choice is refresh, overwrite, or merge.
+If a `DESIGN.md` already exists, **do not silently overwrite it**. Show the user the existing file first. {{ask_instruction}} The choice is refresh, overwrite, or merge. The one exception is the first build on a seeded world (below): the choice is refresh, with no question.
+
+A DESIGN.md written by `impeccable world` carries a `world: "<id>"` line in its frontmatter, and its sidecar carries a `seededFrom` object. Both name the catalog world this system grew from, and both survive every choice: copy the `world:` line into the new frontmatter unchanged, and copy `seededFrom` into the regenerated sidecar. This provenance does not forbid an explicit request from the person for a redesign or a different world, which follows the redesign flow in [new-work.md](new-work.md). A world that replaced the seeded one (its direction roll passed `--replace-world`) is the one case where both are dropped, or every later roll settles on the old world again. They are the one frontmatter key and the one sidecar key kept outside the schemas below.
 
 ## Two paths
 
@@ -262,7 +264,7 @@ After writing or reviewing the sidecar against the final `DESIGN.md`, run:
 
 Pass the same `--target <path>` used for context when documenting a specific workspace. This engine step writes `designMdFingerprint`; do not invent or calculate the digest yourself. It hashes DESIGN.md with SHA-256 after converting CRLF to LF only. Other bytes, including trailing whitespace and the final newline, remain significant. Run it after the last DESIGN.md edit. If it fails, resolve the error before reporting the sidecar as verified.
 
-Legacy sidecars without a valid fingerprint are **unverified**, not stale. Read and compare their contents with DESIGN.md, refresh them if needed, then stamp. Never run the stamp command merely to suppress a warning. Seed mode still skips the sidecar and this command.
+Doctor reports legacy sidecars without a valid fingerprint as **unverified**. Boot, Live, and hooks keep their timestamp-based stale checks until a fingerprint is recorded. Read and compare their contents with DESIGN.md, refresh them if needed, then stamp. Never run the stamp command merely to suppress a warning. Seed mode still skips the sidecar and this command.
 
 #### Schema
 
